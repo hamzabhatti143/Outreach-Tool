@@ -1,0 +1,22 @@
+# Virtual environment (rebuilt inside container by uv)
+.venv/
+
+# Secrets — inject via env vars at runtime, never bake into image
+.env
+
+# Python cache
+__pycache__/
+*.py[oc]
+*.pyo
+
+# Build artifacts
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Tooling / editor
+.git/
+.gitignore
+.python-version
+README.md
