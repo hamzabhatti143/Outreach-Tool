@@ -20,6 +20,14 @@ interface SentLog {
   open_count: number;
   last_opened_at: string | null;
   retry_count: number;
+  reply_sentiment: string | null;
+}
+
+function SentimentBadge({ sentiment }: { sentiment: string | null }) {
+  if (sentiment === "positive") return <Badge variant="success">Positive</Badge>;
+  if (sentiment === "negative") return <Badge variant="destructive">Negative</Badge>;
+  if (sentiment === "neutral") return <Badge variant="warning">Neutral</Badge>;
+  return <span className="text-gray-400 text-xs">—</span>;
 }
 
 export default function SentPage() {
@@ -65,7 +73,12 @@ export default function SentPage() {
       </div>
 
       <div className="flex items-center gap-3 flex-wrap">
-        <Input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-xs" />
+        <Input
+          placeholder="Search..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="max-w-xs"
+        />
         <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-40">
           <option value="">All Statuses</option>
           <option value="sent">Sent</option>
@@ -76,7 +89,9 @@ export default function SentPage() {
       <Card>
         <CardContent className="p-0">
           {loading ? (
-            <div className="flex justify-center py-16"><Loader2 className="h-8 w-8 animate-spin text-indigo-600" /></div>
+            <div className="flex justify-center py-16">
+              <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+            </div>
           ) : filtered.length === 0 ? (
             <p className="py-16 text-center text-sm text-gray-500">No sent emails found.</p>
           ) : (
@@ -90,6 +105,7 @@ export default function SentPage() {
                     <th className="px-4 py-3 text-left font-medium text-gray-600">Sent At</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-600">Status</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-600">Opens</th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-600">Reply Sentiment</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-600">Actions</th>
                   </tr>
                 </thead>
@@ -113,6 +129,9 @@ export default function SentPage() {
                         ) : (
                           <span className="text-gray-400">0</span>
                         )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <SentimentBadge sentiment={log.reply_sentiment} />
                       </td>
                       <td className="px-4 py-3">
                         {log.status === "failed" && (

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { motion } from "framer-motion";
+import { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,18 +23,42 @@ interface EmailCardProps {
 }
 
 export default function EmailCard({ email, onStatusChange }: EmailCardProps) {
-  const [editing, setEditing] = useState(false);
-  const [subject, setSubject] = useState(email.subject);
-  const [body, setBody] = useState(email.body);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedSubject, setEditedSubject] = useState(email.subject);
+  const [editedBody, setEditedBody] = useState(email.body);
   const [saving, setSaving] = useState(false);
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-resize textarea as content changes
+  useEffect(() => {
+    if (textareaRef.current && isEditing) {
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }
+  }, [editedBody, isEditing]);
+
+  function enterEdit() {
+    setEditedSubject(email.subject);
+    setEditedBody(email.body);
+    setIsEditing(true);
+  }
+
+  function cancelEdit() {
+    setEditedSubject(email.subject);
+    setEditedBody(email.body);
+    setIsEditing(false);
+  }
 
   async function handleSave() {
     setSaving(true);
     try {
-      await api.patch(`/outreach/${email.id}/edit`, { subject, body });
-      setEditing(false);
+      await api.patch(`/outreach/${email.id}/edit`, { subject: editedSubject, body: editedBody });
+      setIsEditing(false);
+      setToast("Email updated successfully");
+      setTimeout(() => setToast(null), 3000);
       onStatusChange?.();
     } finally {
       setSaving(false);
@@ -65,7 +89,23 @@ export default function EmailCard({ email, onStatusChange }: EmailCardProps) {
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
+      className="relative"
     >
+      {/* Success toast */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.15 }}
+            className="absolute top-2 right-2 z-10 rounded-md bg-green-600 px-3 py-1.5 text-xs font-medium text-white shadow-md"
+          >
+            {toast}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <Card className="overflow-hidden">
         <CardHeader className="pb-3">
           <div className="flex items-start justify-between gap-2">
@@ -76,15 +116,15 @@ export default function EmailCard({ email, onStatusChange }: EmailCardProps) {
                   <span className="ml-2 text-gray-400">· {email.blog_name}</span>
                 )}
               </p>
-              {editing ? (
+              {isEditing ? (
                 <Input
-                  value={subject}
-                  onChange={(e) => setSubject(e.target.value)}
-                  className="text-sm font-semibold"
+                  value={editedSubject}
+                  onChange={(e) => setEditedSubject(e.target.value)}
+                  className="text-sm font-semibold ring-2 ring-blue-500 focus:ring-blue-500"
                 />
               ) : (
                 <CardTitle className="text-sm font-semibold text-gray-900 truncate">
-                  {subject}
+                  {email.subject}
                 </CardTitle>
               )}
             </div>
@@ -93,37 +133,53 @@ export default function EmailCard({ email, onStatusChange }: EmailCardProps) {
             </Badge>
           </div>
         </CardHeader>
+
         <CardContent className="space-y-3">
-          {editing ? (
-            <Textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={8}
-              className="text-sm"
-            />
+          {isEditing ? (
+            <>
+              <Textarea
+                ref={textareaRef}
+                value={editedBody}
+                onChange={(e) => setEditedBody(e.target.value)}
+                rows={6}
+                className="text-sm ring-2 ring-blue-500 focus:ring-blue-500 resize-none overflow-hidden"
+              />
+              <p className="text-xs font-medium text-amber-600">(unsaved changes)</p>
+            </>
           ) : (
-            <p className="text-sm text-gray-600 whitespace-pre-wrap line-clamp-6">{body}</p>
+            <p className="text-sm text-gray-600 whitespace-pre-wrap line-clamp-6">{email.body}</p>
           )}
 
           <div className="flex items-center gap-2 pt-2">
-            {editing ? (
+            {isEditing ? (
               <>
                 <Button size="sm" onClick={handleSave} loading={saving}>
                   <Save className="h-3 w-3" /> Save
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+                <Button size="sm" variant="ghost" onClick={cancelEdit}>
                   Cancel
                 </Button>
               </>
             ) : (
               <>
-                <Button size="sm" onClick={handleApprove} loading={approving}>
+                <Button
+                  size="sm"
+                  onClick={handleApprove}
+                  loading={approving}
+                  disabled={isEditing}
+                >
                   <Check className="h-3 w-3" /> Approve
                 </Button>
-                <Button size="sm" variant="destructive" onClick={handleReject} loading={rejecting}>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={handleReject}
+                  loading={rejecting}
+                  disabled={isEditing}
+                >
                   <X className="h-3 w-3" /> Reject
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
+                <Button size="sm" variant="ghost" onClick={enterEdit}>
                   <Edit2 className="h-3 w-3" /> Edit
                 </Button>
               </>

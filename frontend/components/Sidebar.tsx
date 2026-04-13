@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -11,6 +11,7 @@ import {
   Mail,
   Send,
   Inbox,
+  MessageSquare,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -18,7 +19,8 @@ import {
   Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { clearTokens } from "@/lib/auth";
+import { clearTokens, isAuthenticated } from "@/lib/auth";
+import api from "@/lib/api";
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -28,13 +30,25 @@ const navItems = [
   { href: "/dashboard/outreach", label: "Outreach", icon: Mail },
   { href: "/dashboard/bulk", label: "Bulk Send", icon: Send },
   { href: "/dashboard/sent", label: "Sent", icon: Inbox },
+  { href: "/dashboard/replies", label: "Replies", icon: MessageSquare },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
+  const [highPriorityCount, setHighPriorityCount] = useState(0);
   const pathname = usePathname();
   const router = useRouter();
+
+  useEffect(() => {
+    if (!isAuthenticated()) return;
+    api
+      .get<{ total: number; high_priority_pending: number }>("/replies/stats")
+      .then(({ data }) => {
+        setHighPriorityCount(data.high_priority_pending ?? 0);
+      })
+      .catch(() => {});
+  }, [pathname]); // refresh badge whenever route changes
 
   function handleLogout() {
     clearTokens();
@@ -63,6 +77,8 @@ export default function Sidebar() {
         {navItems.map(({ href, label, icon: Icon }) => {
           const isActive =
             href === "/dashboard" ? pathname === href : pathname.startsWith(href);
+          const isReplies = href === "/dashboard/replies";
+
           return (
             <Link
               key={href}
@@ -75,7 +91,19 @@ export default function Sidebar() {
               )}
             >
               <Icon className="h-4 w-4 shrink-0" />
-              {!collapsed && <span>{label}</span>}
+              {!collapsed && (
+                <>
+                  <span className="flex-1">{label}</span>
+                  {isReplies && highPriorityCount > 0 && (
+                    <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white leading-none">
+                      {highPriorityCount}
+                    </span>
+                  )}
+                </>
+              )}
+              {collapsed && isReplies && highPriorityCount > 0 && (
+                <span className="absolute left-9 top-1 h-2 w-2 rounded-full bg-amber-500" />
+              )}
             </Link>
           );
         })}

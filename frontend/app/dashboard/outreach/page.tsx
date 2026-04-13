@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Loader2, Check, X, Edit2, Save, CheckCheck,
@@ -43,11 +43,29 @@ export default function OutreachPage() {
   const [approving, setApproving] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Edit state
   const [editing, setEditing] = useState(false);
   const [editSubject, setEditSubject] = useState("");
   const [editBody, setEditBody] = useState("");
+  const bodyTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-resize textarea as content changes
+  useEffect(() => {
+    if (bodyTextareaRef.current && editing) {
+      bodyTextareaRef.current.style.height = "auto";
+      bodyTextareaRef.current.style.height = `${bodyTextareaRef.current.scrollHeight}px`;
+    }
+  }, [editBody, editing]);
+
+  // Sync edit fields from open email whenever open changes and we are not actively editing
+  useEffect(() => {
+    if (!editing && open) {
+      setEditSubject(open.subject);
+      setEditBody(open.body);
+    }
+  }, [open, editing]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -71,6 +89,19 @@ export default function OutreachPage() {
     setEditSubject(email.subject);
     setEditBody(email.body);
     setError(null);
+  }
+
+  function cancelEdit() {
+    setEditing(false);
+    if (open) {
+      setEditSubject(open.subject);
+      setEditBody(open.body);
+    }
+  }
+
+  function showSuccess(msg: string) {
+    setSuccessMsg(msg);
+    setTimeout(() => setSuccessMsg(null), 3000);
   }
 
   function toggleSelect(id: number, e: React.MouseEvent) {
@@ -136,6 +167,7 @@ export default function OutreachPage() {
     try {
       await api.patch(`/outreach/${id}/edit`, { subject: editSubject, body: editBody });
       setEditing(false);
+      showSuccess("Email updated successfully");
       await load();
     } catch {
       setError("Failed to save changes. Please try again.");
@@ -160,6 +192,7 @@ export default function OutreachPage() {
 
   return (
     <div className="space-y-3">
+      {/* Error banner */}
       {error && (
         <div className="flex items-center gap-2 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
           <AlertCircle className="h-4 w-4 shrink-0" />
@@ -169,6 +202,22 @@ export default function OutreachPage() {
           </button>
         </div>
       )}
+
+      {/* Success toast */}
+      <AnimatePresence>
+        {successMsg && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.15 }}
+            className="flex items-center gap-2 rounded-lg bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-700"
+          >
+            <Check className="h-4 w-4 shrink-0" />
+            {successMsg}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="flex h-[calc(100vh-170px)] bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
 
@@ -250,12 +299,19 @@ export default function OutreachPage() {
             >
               {/* Header */}
               <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100 bg-white shrink-0">
-                <button onClick={() => setOpen(null)} className="text-gray-400 hover:text-gray-700 transition-colors lg:hidden">
+                <button
+                  onClick={() => setOpen(null)}
+                  className="text-gray-400 hover:text-gray-700 transition-colors lg:hidden"
+                >
                   <ChevronLeft className="h-5 w-5" />
                 </button>
                 <div className="flex-1 min-w-0">
                   {editing ? (
-                    <Input value={editSubject} onChange={(e) => setEditSubject(e.target.value)} className="text-base font-semibold h-8" />
+                    <Input
+                      value={editSubject}
+                      onChange={(e) => setEditSubject(e.target.value)}
+                      className="text-base font-semibold h-8 ring-2 ring-blue-500 focus:ring-blue-500"
+                    />
                   ) : (
                     <h2 className="text-base font-semibold text-gray-900 truncate">{open.subject}</h2>
                   )}
@@ -263,13 +319,15 @@ export default function OutreachPage() {
                 {statusBadge(open.status)}
               </div>
 
-              {/* Meta row */}
+              {/* Meta + action row */}
               <div className="flex items-center justify-between px-6 py-3 border-b border-gray-100 bg-gray-50 shrink-0">
                 <div>
                   <p className="text-sm text-gray-700">
                     <span className="text-gray-400">To: </span>
                     <span className="font-medium">{open.recipient_email}</span>
-                    {open.blog_name && <span className="ml-2 text-gray-400 text-xs">· {open.blog_name}</span>}
+                    {open.blog_name && (
+                      <span className="ml-2 text-gray-400 text-xs">· {open.blog_name}</span>
+                    )}
                   </p>
                   <p className="text-xs text-gray-400 mt-0.5">{new Date(open.created_at).toLocaleString()}</p>
                 </div>
@@ -277,19 +335,37 @@ export default function OutreachPage() {
                 <div className="flex items-center gap-2">
                   {editing ? (
                     <>
-                      <Button size="sm" onClick={() => handleSave(open.id)} loading={actionLoading === "save"}>
+                      <span className="text-xs font-medium text-amber-600 mr-1">(unsaved changes)</span>
+                      <Button
+                        size="sm"
+                        onClick={() => handleSave(open.id)}
+                        loading={actionLoading === "save"}
+                      >
                         <Save className="h-3 w-3" /> Save
                       </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
+                      <Button size="sm" variant="ghost" onClick={cancelEdit}>
+                        Cancel
+                      </Button>
                     </>
                   ) : (
                     <>
                       {open.status === "pending" && (
                         <>
-                          <Button size="sm" onClick={() => handleApprove(open.id)} loading={actionLoading === "approve"}>
+                          <Button
+                            size="sm"
+                            onClick={() => handleApprove(open.id)}
+                            loading={actionLoading === "approve"}
+                            disabled={editing}
+                          >
                             <Check className="h-3 w-3" /> Approve
                           </Button>
-                          <Button size="sm" variant="destructive" onClick={() => handleReject(open.id)} loading={actionLoading === "reject"}>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => handleReject(open.id)}
+                            loading={actionLoading === "reject"}
+                            disabled={editing}
+                          >
                             <X className="h-3 w-3" /> Reject
                           </Button>
                         </>
@@ -305,21 +381,37 @@ export default function OutreachPage() {
               {/* Body */}
               <div className="flex-1 overflow-y-auto px-6 py-6">
                 {editing ? (
-                  <Textarea value={editBody} onChange={(e) => setEditBody(e.target.value)} rows={18} className="text-sm leading-relaxed resize-none w-full" />
+                  <Textarea
+                    ref={bodyTextareaRef}
+                    value={editBody}
+                    onChange={(e) => setEditBody(e.target.value)}
+                    rows={18}
+                    className="text-sm leading-relaxed resize-none w-full ring-2 ring-blue-500 focus:ring-blue-500 overflow-hidden"
+                  />
                 ) : (
                   <div className="prose prose-sm max-w-none">
-                    <pre className="whitespace-pre-wrap font-sans text-sm text-gray-700 leading-relaxed">{open.body}</pre>
+                    <pre className="whitespace-pre-wrap font-sans text-sm text-gray-700 leading-relaxed">
+                      {open.body}
+                    </pre>
                   </div>
                 )}
               </div>
 
-              {/* Bottom bar */}
+              {/* Bottom bar — only shown when pending and not editing */}
               {open.status === "pending" && !editing && (
                 <div className="shrink-0 border-t border-gray-100 bg-gray-50 px-6 py-3 flex gap-3">
-                  <Button onClick={() => handleApprove(open.id)} loading={actionLoading === "approve"} className="flex-1">
+                  <Button
+                    onClick={() => handleApprove(open.id)}
+                    loading={actionLoading === "approve"}
+                    className="flex-1"
+                  >
                     <Check className="h-4 w-4" /> Approve &amp; Move to Send Queue
                   </Button>
-                  <Button variant="destructive" onClick={() => handleReject(open.id)} loading={actionLoading === "reject"}>
+                  <Button
+                    variant="destructive"
+                    onClick={() => handleReject(open.id)}
+                    loading={actionLoading === "reject"}
+                  >
                     <X className="h-4 w-4" /> Reject
                   </Button>
                 </div>

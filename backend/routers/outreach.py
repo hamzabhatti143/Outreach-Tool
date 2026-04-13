@@ -130,22 +130,24 @@ async def reject_email(
     return {"id": email_id, "status": "rejected"}
 
 
-@router.patch("/{email_id}/edit")
+@router.patch("/{email_id}/edit", response_model=OutreachResponse)
 async def edit_email(
     email_id: int,
-    body: EditRequest,
+    req: EditRequest,
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> OutreachResponse:
     result = await db.execute(
         select(OutreachEmail).where(OutreachEmail.id == email_id)
     )
     email = result.scalar_one_or_none()
     if not email:
         raise HTTPException(status_code=404, detail="Email not found")
-    if body.subject is not None:
-        email.subject = body.subject
-    if body.body is not None:
-        email.body = body.body
+    if req.subject is not None:
+        email.subject = req.subject
+    if req.body is not None:
+        email.body = req.body
     await db.commit()
-    return {"id": email_id, "updated": True}
+    await db.refresh(email)
+    enriched = await _enrich_emails([email], db)
+    return enriched[0]

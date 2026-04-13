@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Boolean,
-    ForeignKey, Enum, func
+    ForeignKey, Enum, Float, func
 )
 from sqlalchemy.orm import declarative_base, relationship
 import enum
@@ -126,6 +126,7 @@ class OutreachEmail(Base):
     lead = relationship("Lead", back_populates="outreach_emails")
     campaign = relationship("Campaign", back_populates="outreach_emails")
     sent_logs = relationship("SentLog", back_populates="outreach_email", cascade="all, delete-orphan")
+    replies = relationship("EmailReply", back_populates="outreach_email", cascade="all, delete-orphan")
 
 
 class SentLog(Base):
@@ -140,3 +141,42 @@ class SentLog(Base):
     retry_count = Column(Integer, default=0, nullable=False)
 
     outreach_email = relationship("OutreachEmail", back_populates="sent_logs")
+
+
+class EmailReply(Base):
+    __tablename__ = "email_replies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    outreach_email_id = Column(Integer, ForeignKey("outreach_emails.id", ondelete="CASCADE"), nullable=False)
+    from_email = Column(String(255), nullable=False)
+    from_name = Column(String(255), nullable=True)
+    subject = Column(String(500), nullable=True)
+    body = Column(Text, nullable=False)
+    received_at = Column(DateTime, server_default=func.now())
+    message_id = Column(String(500), nullable=True, unique=True)
+    # Sentiment analysis fields
+    sentiment = Column(String(20), nullable=True)        # positive | neutral | negative
+    sentiment_score = Column(Float, nullable=True)       # 0.0 – 1.0
+    priority = Column(String(20), nullable=True)         # high | medium | low
+
+    outreach_email = relationship("OutreachEmail", back_populates="replies")
+    ai_response = relationship(
+        "AIResponse", back_populates="reply",
+        uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class AIResponse(Base):
+    __tablename__ = "ai_responses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    reply_id = Column(Integer, ForeignKey("email_replies.id", ondelete="CASCADE"), nullable=False, unique=True)
+    suggested_subject = Column(String(500), nullable=True)
+    suggested_body = Column(Text, nullable=True)
+    user_edited_subject = Column(String(500), nullable=True)
+    user_edited_body = Column(Text, nullable=True)
+    is_approved = Column(Boolean, default=False, nullable=False)
+    is_sent = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    reply = relationship("EmailReply", back_populates="ai_response")

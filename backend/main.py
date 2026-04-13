@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from db.database import init_db
 from utils.smtp_check import check_smtp_connection
-from routers import auth, campaigns, sources, leads, outreach, bulk, sent, tracking, settings
+from routers import auth, campaigns, sources, leads, outreach, bulk, sent, tracking, settings, replies
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ app.include_router(bulk.router)
 app.include_router(sent.router)
 app.include_router(tracking.router)
 app.include_router(settings.router)
+app.include_router(replies.router)
 
 
 @app.get("/health")
