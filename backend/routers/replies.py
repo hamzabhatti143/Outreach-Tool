@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from db.database import get_db, AsyncSessionLocal
-from db.models import EmailReply, AIResponse, OutreachEmail, Lead, BlogSource
+from db.models import EmailReply, AIResponse, OutreachEmail, Lead, BlogSource, Campaign, User
 from utils.auth import get_current_user_id
 
 load_dotenv()
@@ -23,11 +23,12 @@ router = APIRouter(prefix="/replies", tags=["replies"])
 
 _openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Outreach Tool")
+# Global .env fallbacks used when the user hasn't saved their own SMTP settings
+_ENV_SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+_ENV_SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+_ENV_SMTP_USER = os.getenv("SMTP_USER", "")
+_ENV_SMTP_PASS = os.getenv("SMTP_PASS", "")
+_ENV_SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Outreach Tool")
 
 _REPLY_SYSTEM = (
     "You are an expert email response specialist. "
@@ -189,24 +190,58 @@ async def _generate_ai_reply(reply: EmailReply, outreach: OutreachEmail | None) 
     return {"subject": data.get("subject", fallback), "body": data.get("body", "")}
 
 
-def _smtp_send_sync(to: str, subject: str, body: str) -> None:
-    """Synchronous SMTP send — run in executor."""
+def _smtp_send_sync(to: str, subject: str, body: str, smtp: dict) -> None:
+    """Synchronous SMTP send — called via run_in_executor."""
     msg = MIMEMultipart("alternative")
-    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
+    msg["From"] = f"{smtp['from_name']} <{smtp['user']}>"
     msg["To"] = to
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+    with smtplib.SMTP(smtp["host"], smtp["port"], timeout=10) as server:
         server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, to, msg.as_string())
+        server.login(smtp["user"], smtp["pass"])
+        server.sendmail(smtp["user"], to, msg.as_string())
+
+
+async def _load_smtp_for_reply(reply_id: int) -> dict:
+    """
+    Walk reply → outreach_email → campaign → user to load per-user SMTP.
+    Falls back to global .env values if the user has no SMTP configured.
+    """
+    smtp = {
+        "host": _ENV_SMTP_HOST, "port": _ENV_SMTP_PORT,
+        "user": _ENV_SMTP_USER, "pass": _ENV_SMTP_PASS,
+        "from_name": _ENV_SMTP_FROM_NAME,
+    }
+    try:
+        async with AsyncSessionLocal() as db:
+            reply = await db.get(EmailReply, reply_id)
+            if reply:
+                oe = await db.get(OutreachEmail, reply.outreach_email_id)
+                if oe:
+                    camp = await db.get(Campaign, oe.campaign_id)
+                    if camp:
+                        user = await db.get(User, camp.user_id)
+                        if user:
+                            smtp = {
+                                "host": user.smtp_host or _ENV_SMTP_HOST,
+                                "port": user.smtp_port or _ENV_SMTP_PORT,
+                                "user": user.smtp_user or _ENV_SMTP_USER,
+                                "pass": user.smtp_pass or _ENV_SMTP_PASS,
+                                "from_name": user.smtp_from_name or _ENV_SMTP_FROM_NAME,
+                            }
+    except Exception as exc:
+        logger.error("Failed to load user SMTP for reply_id=%s: %s", reply_id, exc)
+    return smtp
 
 
 async def _send_and_mark(reply_id: int, to: str, subject: str, body: str) -> None:
-    """Background coroutine: send email then mark ai_response.is_sent = True."""
+    """Background coroutine: load user SMTP, send reply, then mark is_sent = True."""
+    smtp = await _load_smtp_for_reply(reply_id)
+
     try:
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _smtp_send_sync, to, subject, body)
+        await loop.run_in_executor(None, lambda: _smtp_send_sync(to, subject, body, smtp))
     except Exception as exc:
         logger.error("Reply send failed for reply_id=%s: %s", reply_id, exc)
         return

@@ -2,24 +2,26 @@ import os
 import smtplib
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
 from db.database import get_db
 from db.models import User
 from utils.auth import get_current_user_id, hash_password
-from dotenv import load_dotenv, set_key
-from pathlib import Path
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
-ENV_PATH = Path(__file__).parent.parent / ".env"
+# Env fallbacks — used when the user hasn't configured their own SMTP yet
+_ENV_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+_ENV_PORT = int(os.getenv("SMTP_PORT", "587"))
+_ENV_USER = os.getenv("SMTP_USER", "")
+_ENV_PASS = os.getenv("SMTP_PASS", "")
+_ENV_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Outreach Tool")
 
 
 class SmtpConfig(BaseModel):
     host: str
     port: int
     username: str
-    password: str | None = None  # None means keep existing
+    password: str | None = None   # None means keep existing password
     from_name: str
 
 
@@ -37,14 +39,32 @@ class ProfileUpdate(BaseModel):
     new_password: str | None = None
 
 
+def _user_smtp(user: User) -> dict:
+    """Return the effective SMTP config for a user, falling back to .env."""
+    return {
+        "host": user.smtp_host or _ENV_HOST,
+        "port": user.smtp_port or _ENV_PORT,
+        "user": user.smtp_user or _ENV_USER,
+        "pass": user.smtp_pass or _ENV_PASS,
+        "from_name": user.smtp_from_name or _ENV_FROM_NAME,
+    }
+
+
 @router.get("/smtp", response_model=SmtpResponse)
-async def get_smtp(user_id: int = Depends(get_current_user_id)) -> SmtpResponse:
+async def get_smtp(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> SmtpResponse:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    cfg = _user_smtp(user)
     return SmtpResponse(
-        host=os.getenv("SMTP_HOST", ""),
-        port=int(os.getenv("SMTP_PORT", "587")),
-        username=os.getenv("SMTP_USER", ""),
-        from_name=os.getenv("SMTP_FROM_NAME", "Outreach Tool"),
-        password_set=bool(os.getenv("SMTP_PASS", "")),
+        host=cfg["host"],
+        port=cfg["port"],
+        username=cfg["user"],
+        from_name=cfg["from_name"],
+        password_set=bool(cfg["pass"]),
     )
 
 
@@ -52,35 +72,40 @@ async def get_smtp(user_id: int = Depends(get_current_user_id)) -> SmtpResponse:
 async def save_smtp(
     body: SmtpConfig,
     user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    if ENV_PATH.exists():
-        set_key(str(ENV_PATH), "SMTP_HOST", body.host)
-        set_key(str(ENV_PATH), "SMTP_PORT", str(body.port))
-        set_key(str(ENV_PATH), "SMTP_USER", body.username)
-        set_key(str(ENV_PATH), "SMTP_FROM_NAME", body.from_name)
-        if body.password:
-            set_key(str(ENV_PATH), "SMTP_PASS", body.password)
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-        # Reload env
-        load_dotenv(str(ENV_PATH), override=True)
+    user.smtp_host = body.host
+    user.smtp_port = body.port
+    user.smtp_user = body.username
+    user.smtp_from_name = body.from_name
+    if body.password:            # only overwrite when a new password is provided
+        user.smtp_pass = body.password
 
+    await db.commit()
     return {"message": "SMTP settings saved"}
 
 
 @router.post("/smtp/test")
-async def test_smtp(user_id: int = Depends(get_current_user_id)) -> dict:
-    host = os.getenv("SMTP_HOST", "")
-    port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user = os.getenv("SMTP_USER", "")
-    smtp_pass = os.getenv("SMTP_PASS", "")
+async def test_smtp(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    if not host or not smtp_user or not smtp_pass:
-        raise HTTPException(status_code=400, detail="SMTP not configured")
+    cfg = _user_smtp(user)
+    if not cfg["user"] or not cfg["pass"]:
+        raise HTTPException(status_code=400, detail="SMTP not configured — add your Gmail address and app password first")
 
     try:
-        with smtplib.SMTP(host, port, timeout=10) as server:
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=10) as server:
             server.starttls()
-            server.login(smtp_user, smtp_pass)
+            server.login(cfg["user"], cfg["pass"])
         return {"ok": True, "message": "SMTP connection successful"}
     except Exception as e:
         return {"ok": False, "message": str(e)}

@@ -48,6 +48,13 @@ class User(Base):
     name = Column(String(255), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
+    # Per-user SMTP settings — override the global .env defaults
+    smtp_host = Column(String(255), nullable=True)
+    smtp_port = Column(Integer, nullable=True)
+    smtp_user = Column(String(255), nullable=True)   # the "from" email address
+    smtp_pass = Column(String(500), nullable=True)   # Gmail app password
+    smtp_from_name = Column(String(255), nullable=True)
+
     campaigns = relationship("Campaign", back_populates="user", cascade="all, delete-orphan")
 
 

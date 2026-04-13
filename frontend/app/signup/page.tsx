@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Zap } from "lucide-react";
+import { Zap, ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import api from "@/lib/api";
@@ -12,9 +12,18 @@ import { setTokens } from "@/lib/auth";
 
 export default function SignupPage() {
   const router = useRouter();
+
+  // Account fields
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+
+  // SMTP fields (optional at signup)
+  const [showSmtp, setShowSmtp] = useState(false);
+  const [smtpUser, setSmtpUser] = useState("");
+  const [smtpPass, setSmtpPass] = useState("");
+  const [smtpFromName, setSmtpFromName] = useState("");
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,7 +33,14 @@ export default function SignupPage() {
     setError(null);
 
     try {
-      const { data } = await api.post("/auth/signup", { name, email, password });
+      const { data } = await api.post("/auth/signup", {
+        name: name || undefined,
+        email,
+        password,
+        smtp_user: smtpUser || undefined,
+        smtp_pass: smtpPass || undefined,
+        smtp_from_name: smtpFromName || undefined,
+      });
       setTokens(data.access_token, data.refresh_token);
       router.push("/dashboard");
     } catch (err: unknown) {
@@ -36,7 +52,7 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4 py-10">
       <motion.div
         className="w-full max-w-sm"
         initial={{ opacity: 0, y: 20 }}
@@ -52,6 +68,8 @@ export default function SignupPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 bg-white p-8 rounded-xl border border-gray-200 shadow-sm">
+
+          {/* ── Account details ── */}
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-gray-700">Full Name</label>
             <Input
@@ -62,6 +80,7 @@ export default function SignupPage() {
               autoComplete="name"
             />
           </div>
+
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-gray-700">Email</label>
             <Input
@@ -73,6 +92,7 @@ export default function SignupPage() {
               autoComplete="email"
             />
           </div>
+
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-gray-700">Password</label>
             <Input
@@ -84,6 +104,80 @@ export default function SignupPage() {
               minLength={8}
               autoComplete="new-password"
             />
+          </div>
+
+          {/* ── SMTP / Email sending setup (collapsible) ── */}
+          <div className="border border-gray-200 rounded-lg overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setShowSmtp((v) => !v)}
+              className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors"
+            >
+              <span>Email Sending Setup <span className="text-gray-400 font-normal">(optional)</span></span>
+              {showSmtp ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+            </button>
+
+            {showSmtp && (
+              <div className="px-4 pb-4 pt-3 space-y-3 border-t border-gray-100">
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  OutreachAI sends emails from your own Gmail account using an{" "}
+                  <a
+                    href="https://myaccount.google.com/apppasswords"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-indigo-600 hover:underline inline-flex items-center gap-0.5"
+                  >
+                    App Password <ExternalLink className="h-3 w-3" />
+                  </a>
+                  . You can also configure this later in Settings.
+                </p>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-gray-700">Gmail Address</label>
+                  <Input
+                    type="email"
+                    placeholder="you@gmail.com"
+                    value={smtpUser}
+                    onChange={(e) => setSmtpUser(e.target.value)}
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-gray-400">The Gmail account your outreach emails are sent from.</p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-gray-700">Gmail App Password</label>
+                  <Input
+                    type="password"
+                    placeholder="xxxx xxxx xxxx xxxx"
+                    value={smtpPass}
+                    onChange={(e) => setSmtpPass(e.target.value)}
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-gray-400">
+                    16-character app password — not your Gmail login password.{" "}
+                    <a
+                      href="https://myaccount.google.com/apppasswords"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-indigo-600 hover:underline"
+                    >
+                      Generate one here.
+                    </a>
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-gray-700">Sender Display Name</label>
+                  <Input
+                    type="text"
+                    placeholder="Your Name or Company"
+                    value={smtpFromName}
+                    onChange={(e) => setSmtpFromName(e.target.value)}
+                  />
+                  <p className="text-xs text-gray-400">How you appear in the recipient's inbox.</p>
+                </div>
+              </div>
+            )}
           </div>
 
           {error && (
