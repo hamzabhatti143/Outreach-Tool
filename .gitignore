@@ -1,6 +1,10 @@
 # Secrets — never commit real env files
 backend/.env
 frontend/.env.local
+frontend/.env
+.env
+*.env.local
+*.env.production
 
 # Python
 __pycache__/
