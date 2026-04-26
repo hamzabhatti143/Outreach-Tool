@@ -17,6 +17,7 @@ import {
   ChevronRight,
   LogOut,
   Zap,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { clearTokens, isAuthenticated } from "@/lib/auth";
@@ -31,6 +32,7 @@ const navItems = [
   { href: "/dashboard/bulk", label: "Bulk Send", icon: Send },
   { href: "/dashboard/sent", label: "Sent", icon: Inbox },
   { href: "/dashboard/replies", label: "Replies", icon: MessageSquare },
+  { href: "/dashboard/gmail-setup", label: "Gmail Setup", icon: BookOpen },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 

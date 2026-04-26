@@ -1,235 +1,187 @@
 """
-reply_tracker.py — IMAP inbox polling + sentiment analysis for incoming replies.
+reply_tracker.py — Gmail thread-based reply detection + sentiment analysis.
 """
-import os
-import imaplib
-import email
-import email.header
-import email.message
-import asyncio
+import base64
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+from datetime import datetime, timezone
 
-load_dotenv()
+import httpx
 
 logger = logging.getLogger(__name__)
-
-IMAP_HOST = os.getenv("IMAP_HOST", "imap.gmail.com")
-IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-
-_executor = ThreadPoolExecutor(max_workers=2)
 
 
 def analyze_sentiment(text: str) -> dict:
     """
     Analyse the sentiment of text using TextBlob's pattern analyser.
-
-    Returns:
-        {
-          "sentiment": "positive" | "neutral" | "negative",
-          "sentiment_score": float 0–1,
-          "priority": "high" | "medium" | "low",
-        }
+    Returns {"sentiment", "sentiment_score", "priority"}.
     """
     from textblob import TextBlob
 
-    # Cap input to keep latency low
     blob = TextBlob(text[:2000])
-    polarity: float = blob.sentiment.polarity  # −1.0 … +1.0
+    polarity: float = blob.sentiment.polarity
 
     if polarity > 0.1:
-        label = "positive"
-        priority = "high"
+        label, priority = "positive", "high"
     elif polarity < -0.1:
-        label = "negative"
-        priority = "low"
+        label, priority = "negative", "low"
     else:
-        label = "neutral"
-        priority = "medium"
+        label, priority = "neutral", "medium"
 
-    # Map absolute polarity → confidence (small base so neutral never reads 0)
     confidence = round(min(abs(polarity) + 0.05, 1.0), 3)
-
     return {"sentiment": label, "sentiment_score": confidence, "priority": priority}
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+def _extract_gmail_body(payload: dict) -> str:
+    """Recursively extract plain-text body from a Gmail message payload."""
+    mime_type = payload.get("mimeType", "")
 
-def _decode_header_str(raw: str) -> str:
-    parts = email.header.decode_header(raw or "")
-    result = ""
-    for fragment, charset in parts:
-        if isinstance(fragment, bytes):
-            result += fragment.decode(charset or "utf-8", errors="replace")
-        else:
-            result += fragment
-    return result
+    if mime_type == "text/plain":
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
 
+    for part in payload.get("parts", []):
+        result = _extract_gmail_body(part)
+        if result:
+            return result
 
-def _extract_body(msg: email.message.Message) -> str:
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                try:
-                    return part.get_payload(decode=True).decode(
-                        part.get_content_charset() or "utf-8", errors="replace"
-                    )
-                except Exception:
-                    pass
-    else:
-        try:
-            return msg.get_payload(decode=True).decode(
-                msg.get_content_charset() or "utf-8", errors="replace"
-            )
-        except Exception:
-            pass
     return ""
 
 
-def _fetch_emails_sync() -> list[dict]:
+async def poll_inbox(user_id: int) -> dict:
     """
-    Connect to IMAP, retrieve emails from the past 30 days, and return
-    parsed message dicts.  Runs in a ThreadPoolExecutor (blocking I/O).
-    """
-    messages: list[dict] = []
-    if not SMTP_USER or not SMTP_PASS:
-        logger.warning("IMAP credentials not configured — skipping inbox poll")
-        return messages
+    Poll Gmail threads for replies to sent outreach emails.
 
-    try:
-        mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
-        mail.login(SMTP_USER, SMTP_PASS)
-        mail.select("INBOX")
-
-        cutoff = (datetime.now() - timedelta(days=30)).strftime("%d-%b-%Y")
-        _, data = mail.search(None, f"SINCE {cutoff}")
-        if not data or not data[0]:
-            mail.logout()
-            return messages
-
-        for uid in data[0].split():
-            try:
-                _, msg_data = mail.fetch(uid, "(RFC822)")
-                if not msg_data or not msg_data[0]:
-                    continue
-                raw = msg_data[0][1]
-                msg = email.message_from_bytes(raw)
-
-                subject = _decode_header_str(msg.get("Subject", ""))
-                from_raw = _decode_header_str(msg.get("From", ""))
-
-                # Parse "Name <addr>" or plain address
-                if "<" in from_raw and ">" in from_raw:
-                    from_name = from_raw[:from_raw.index("<")].strip().strip('"\'')
-                    from_email = from_raw[from_raw.index("<") + 1:from_raw.index(">")].strip()
-                else:
-                    from_name = ""
-                    from_email = from_raw.strip()
-
-                message_id = (msg.get("Message-ID") or "").strip()
-                body = _extract_body(msg).strip()
-
-                messages.append({
-                    "from_email": from_email.lower(),
-                    "from_name": from_name,
-                    "subject": subject,
-                    "body": body,
-                    "message_id": message_id or None,
-                })
-            except Exception as exc:
-                logger.debug("Skipping malformed IMAP message: %s", exc)
-
-        mail.logout()
-    except Exception as exc:
-        logger.error("IMAP fetch error: %s", exc)
-
-    return messages
-
-
-# ── public API ────────────────────────────────────────────────────────────────
-
-async def poll_inbox() -> dict:
-    """
-    Poll the IMAP inbox for replies to sent outreach emails.
-
-    Match strategy: if the sender's address appears in our leads table AND
-    there is a SentLog row for the corresponding outreach email, it is a reply.
-
-    For each new reply:
-      1. Save to email_replies.
-      2. Immediately call analyze_sentiment() on the body.
-      3. Persist sentiment / sentiment_score / priority on the same row.
+    Strategy:
+      - Find all SentLog rows (for this user) that have a gmail_thread_id
+        but no EmailReply yet.
+      - Call Gmail Threads API for each thread.
+      - If messages > 1, the thread has replies — save them as EmailReply rows
+        and run sentiment analysis.
 
     Returns {"new": int, "errors": list[str]}
     """
-    loop = asyncio.get_event_loop()
-    messages = await loop.run_in_executor(_executor, _fetch_emails_sync)
+    from sqlalchemy import select
+    from db.database import retry_session
+    from db.models import (
+        EmailReply, OutreachEmail, Lead, SentLog, SentStatus,
+        Campaign, User,
+    )
+    from routers.gmail import _get_valid_token
 
     new_count = 0
     errors: list[str] = []
 
-    from sqlalchemy import select
-    from db.database import AsyncSessionLocal
-    from db.models import EmailReply, OutreachEmail, Lead, SentLog, SentStatus
+    async with retry_session() as db:
+        # Load the user
+        user = await db.get(User, user_id)
+        if not user or not user.gmail_refresh_token:
+            return {"new": 0, "errors": ["Gmail not connected"]}
 
-    async with AsyncSessionLocal() as db:
-        # Build map: lead_email → outreach_email_id  (only for emails we actually sent)
+        # Get a valid access token
+        try:
+            access_token = await _get_valid_token(user, db)
+        except Exception as exc:
+            return {"new": 0, "errors": [f"Token error: {exc}"]}
+
+        # Find SentLog rows for this user's campaigns that have a thread ID
         rows = await db.execute(
             select(SentLog, OutreachEmail, Lead)
             .join(OutreachEmail, SentLog.outreach_email_id == OutreachEmail.id)
             .join(Lead, OutreachEmail.lead_id == Lead.id)
-            .where(SentLog.status == SentStatus.sent)
+            .join(Campaign, OutreachEmail.campaign_id == Campaign.id)
+            .where(
+                Campaign.user_id == user_id,
+                SentLog.status == SentStatus.sent,
+                SentLog.gmail_thread_id.isnot(None),
+            )
         )
-        lead_email_map: dict[str, int] = {}
-        for log, oe, lead in rows.all():
-            lead_email_map[lead.email.lower()] = oe.id
 
-        for msg in messages:
-            try:
-                from_email = msg["from_email"]
-                if not from_email or from_email not in lead_email_map:
-                    continue
+        sent_rows = rows.all()
+        if not sent_rows:
+            return {"new": 0, "errors": []}
 
-                outreach_email_id = lead_email_map[from_email]
-
-                # Deduplicate by message_id
-                if msg["message_id"]:
-                    existing = await db.execute(
-                        select(EmailReply).where(EmailReply.message_id == msg["message_id"])
+        async with httpx.AsyncClient(timeout=15) as client:
+            for log, oe, lead in sent_rows:
+                try:
+                    r = await client.get(
+                        f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{log.gmail_thread_id}",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        params={"format": "full"},
                     )
-                    if existing.scalar_one_or_none():
+
+                    if r.status_code == 401:
+                        # Token expired mid-batch — refresh and retry once
+                        access_token = await _get_valid_token(user, db)
+                        r = await client.get(
+                            f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{log.gmail_thread_id}",
+                            headers={"Authorization": f"Bearer {access_token}"},
+                            params={"format": "full"},
+                        )
+
+                    if r.status_code >= 400:
+                        errors.append(f"Thread {log.gmail_thread_id}: HTTP {r.status_code}")
                         continue
 
-                # 1. Save reply
-                reply = EmailReply(
-                    outreach_email_id=outreach_email_id,
-                    from_email=from_email,
-                    from_name=msg["from_name"] or None,
-                    subject=msg["subject"] or None,
-                    body=msg["body"] or "(empty)",
-                    message_id=msg["message_id"],
-                )
-                db.add(reply)
-                await db.flush()  # get reply.id without committing
+                    messages = r.json().get("messages", [])
+                    if len(messages) <= 1:
+                        continue  # no replies yet
 
-                # 2. Analyse sentiment immediately after saving
-                sentiment_data = analyze_sentiment(msg["body"])
+                    # messages[0] is our outreach; messages[1:] are replies
+                    for reply_msg in messages[1:]:
+                        msg_id = reply_msg.get("id", "")
 
-                # 3. Store sentiment on the row
-                reply.sentiment = sentiment_data["sentiment"]
-                reply.sentiment_score = sentiment_data["sentiment_score"]
-                reply.priority = sentiment_data["priority"]
+                        # Deduplicate
+                        existing = await db.execute(
+                            select(EmailReply).where(EmailReply.message_id == msg_id)
+                        )
+                        if existing.scalar_one_or_none():
+                            continue
 
-                await db.commit()
-                new_count += 1
+                        headers = {
+                            h["name"].lower(): h["value"]
+                            for h in reply_msg.get("payload", {}).get("headers", [])
+                        }
+                        from_raw = headers.get("from", lead.email)
+                        subject = headers.get("subject", "")
 
-            except Exception as exc:
-                logger.error("Error saving reply: %s", exc)
-                errors.append(str(exc))
-                await db.rollback()
+                        if "<" in from_raw and ">" in from_raw:
+                            from_name = from_raw[:from_raw.index("<")].strip().strip('"\'')
+                            from_email = from_raw[from_raw.index("<") + 1:from_raw.index(">")].strip().lower()
+                        else:
+                            from_name = ""
+                            from_email = from_raw.strip().lower()
+
+                        body_text = _extract_gmail_body(reply_msg.get("payload", {})).strip()
+
+                        internal_date_ms = int(reply_msg.get("internalDate", "0"))
+                        received_at = datetime.fromtimestamp(
+                            internal_date_ms / 1000, tz=timezone.utc
+                        ).replace(tzinfo=None)
+
+                        reply = EmailReply(
+                            outreach_email_id=oe.id,
+                            from_email=from_email,
+                            from_name=from_name or None,
+                            subject=subject or None,
+                            body=body_text or "(empty)",
+                            message_id=msg_id,
+                            received_at=received_at,
+                        )
+                        db.add(reply)
+                        await db.flush()
+
+                        sentiment_data = analyze_sentiment(body_text)
+                        reply.sentiment = sentiment_data["sentiment"]
+                        reply.sentiment_score = sentiment_data["sentiment_score"]
+                        reply.priority = sentiment_data["priority"]
+
+                        await db.commit()
+                        new_count += 1
+
+                except Exception as exc:
+                    logger.error("Error checking thread %s: %s", log.gmail_thread_id, exc)
+                    errors.append(str(exc))
+                    await db.rollback()
 
     return {"new": new_count, "errors": errors}

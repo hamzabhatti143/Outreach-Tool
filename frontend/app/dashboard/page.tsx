@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Users, Send, Eye, Megaphone } from "lucide-react";
+import Link from "next/link";
+import { Users, Send, Eye, Megaphone, AlertTriangle, ExternalLink, X } from "lucide-react";
 import StatsWidget from "@/components/StatsWidget";
 import CampaignLauncher from "@/components/CampaignLauncher";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,12 +29,18 @@ export default function DashboardPage() {
   const { campaigns, refresh: refreshCampaigns, loading: campaignsLoading } = useCampaigns();
   const [sentLogs, setSentLogs] = useState<SentLog[]>([]);
   const [sentLoading, setSentLoading] = useState(true);
+  const [smtpMissing, setSmtpMissing] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   useEffect(() => {
     api.get<SentLog[]>("/sent")
       .then((r) => setSentLogs(r.data))
       .catch(() => {})
       .finally(() => setSentLoading(false));
+
+    api.get<{ connected: boolean }>("/auth/gmail/status")
+      .then((r) => { if (!r.data.connected) setSmtpMissing(true); })
+      .catch(() => {});
   }, []);
 
   const totalOpens = sentLogs.reduce((acc, l) => acc + (l.open_count || 0), 0);
@@ -52,6 +59,40 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8">
+      {smtpMissing && !bannerDismissed && (
+        <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3.5">
+          <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600 mt-0.5" />
+          <div className="flex-1 text-sm">
+            <p className="font-semibold text-amber-900">Gmail not connected</p>
+            <p className="text-amber-800 mt-0.5">
+              Connect your Gmail account in{" "}
+              <Link href="/dashboard/settings" className="font-medium underline underline-offset-2">
+                Settings
+              </Link>{" "}
+              before you can send outreach emails.{" "}
+              <span className="text-amber-700">
+                Need a Google Cloud project?{" "}
+                <a
+                  href="https://console.cloud.google.com/apis/credentials"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-0.5 font-medium underline underline-offset-2"
+                >
+                  Open Cloud Console <ExternalLink className="h-3 w-3" />
+                </a>
+              </span>
+            </p>
+          </div>
+          <button
+            onClick={() => setBannerDismissed(true)}
+            className="text-amber-500 hover:text-amber-700 transition-colors shrink-0"
+            aria-label="Dismiss"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Overview</h1>
         <p className="text-gray-500 mt-1">Your outreach at a glance.</p>

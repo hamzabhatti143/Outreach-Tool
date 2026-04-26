@@ -16,10 +16,6 @@ class SignupRequest(BaseModel):
     email: EmailStr
     password: str
     name: str | None = None
-    # Optional SMTP fields collected during signup
-    smtp_user: str | None = None        # the Gmail address to send from
-    smtp_pass: str | None = None        # Gmail app password (16 chars)
-    smtp_from_name: str | None = None   # display name in outreach emails
 
 
 class LoginRequest(BaseModel):
@@ -47,9 +43,6 @@ async def signup(body: SignupRequest, db: AsyncSession = Depends(get_db)) -> Tok
         email=body.email,
         password_hash=hash_password(body.password),
         name=body.name,
-        smtp_user=body.smtp_user or None,
-        smtp_pass=body.smtp_pass or None,
-        smtp_from_name=body.smtp_from_name or None,
     )
     db.add(user)
     await db.flush()

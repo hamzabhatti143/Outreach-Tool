@@ -4,7 +4,7 @@ from sqlalchemy import select, delete
 from pydantic import BaseModel
 from datetime import datetime
 from db.database import get_db
-from db.models import OutreachEmail, OutreachStatus, Lead, BlogSource
+from db.models import OutreachEmail, OutreachStatus, Lead, BlogSource, Campaign
 from utils.auth import get_current_user_id
 
 router = APIRouter(prefix="/outreach", tags=["outreach"])
@@ -69,13 +69,65 @@ async def _enrich_emails(emails: list, db: AsyncSession) -> list[OutreachRespons
     return output
 
 
+@router.post("/generate")
+async def generate_outreach_drafts(
+    campaign_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Run the writer agent for a campaign and return how many drafts were created."""
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user_id)
+    )
+    campaign = result.scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    # Check leads exist
+    leads_res = await db.execute(
+        select(Lead).where(Lead.campaign_id == campaign_id)
+    )
+    leads = leads_res.scalars().all()
+    if not leads:
+        raise HTTPException(
+            status_code=400,
+            detail="No leads found for this campaign. Run the full pipeline first to discover and scrape blogs."
+        )
+
+    from pipeline.writer_agent import run_writer_agent
+    try:
+        generated = await run_writer_agent(campaign_id, campaign.niche, db)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Writer agent failed: {exc}")
+
+    return {"generated": generated, "total_leads": len(leads)}
+
+
+@router.get("/all", response_model=list[OutreachResponse])
+async def list_all(
+    campaign_id: int | None = None,
+    status: str | None = None,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> list[OutreachResponse]:
+    """Return outreach emails filtered by campaign and optionally by status string."""
+    query = select(OutreachEmail)
+    if campaign_id:
+        query = query.where(OutreachEmail.campaign_id == campaign_id)
+    if status:
+        # Compare as raw string to avoid enum coercion issues
+        query = query.where(OutreachEmail.status == status)
+    result = await db.execute(query.order_by(OutreachEmail.created_at.desc()))
+    return await _enrich_emails(result.scalars().all(), db)
+
+
 @router.get("/pending", response_model=list[OutreachResponse])
 async def list_pending(
     campaign_id: int | None = None,
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[OutreachResponse]:
-    query = select(OutreachEmail).where(OutreachEmail.status == OutreachStatus.pending)
+    query = select(OutreachEmail).where(OutreachEmail.status == "pending")
     if campaign_id:
         query = query.where(OutreachEmail.campaign_id == campaign_id)
     result = await db.execute(query.order_by(OutreachEmail.created_at.desc()))
@@ -88,7 +140,7 @@ async def list_approved(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[OutreachResponse]:
-    query = select(OutreachEmail).where(OutreachEmail.status == OutreachStatus.approved)
+    query = select(OutreachEmail).where(OutreachEmail.status == "approved")
     if campaign_id:
         query = query.where(OutreachEmail.campaign_id == campaign_id)
     result = await db.execute(query.order_by(OutreachEmail.approved_at.desc()))

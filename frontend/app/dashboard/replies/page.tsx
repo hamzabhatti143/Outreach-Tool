@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Loader2, RefreshCw, ChevronLeft, Sparkles, Send,
   Check, CheckCheck, AlertCircle, ArrowUpDown, InboxIcon,
+  ChevronDown, ChevronUp, ExternalLink, Mail, MailOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,7 +39,10 @@ interface ReplyItem {
   sentiment_score: number | null;
   priority: string | null;
   outreach_subject: string | null;
+  outreach_body: string | null;
+  lead_email: string | null;
   blog_name: string | null;
+  blog_url: string | null;
   ai_response: AIResponseData | null;
 }
 
@@ -63,6 +67,71 @@ function SentimentBadge({ sentiment }: { sentiment: string | null }) {
   return null;
 }
 
+// Collapsible email bubble used for original email + their reply
+function EmailBubble({
+  label,
+  from,
+  date,
+  subject,
+  body,
+  defaultOpen = false,
+  accent = "gray",
+}: {
+  label: string;
+  from: string;
+  date?: string;
+  subject?: string | null;
+  body: string;
+  defaultOpen?: boolean;
+  accent?: "gray" | "indigo";
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const borderColor = accent === "indigo" ? "border-indigo-200" : "border-gray-200";
+  const labelColor = accent === "indigo" ? "text-indigo-600" : "text-gray-500";
+
+  return (
+    <div className={`rounded-lg border ${borderColor} overflow-hidden`}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          {open ? (
+            <MailOpen className={`h-4 w-4 shrink-0 ${labelColor}`} />
+          ) : (
+            <Mail className={`h-4 w-4 shrink-0 ${labelColor}`} />
+          )}
+          <div className="min-w-0">
+            <span className={`text-xs font-semibold uppercase tracking-wide ${labelColor}`}>{label}</span>
+            {!open && (
+              <p className="text-xs text-gray-500 truncate mt-0.5">
+                {from}{subject ? ` · ${subject}` : ""}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {date && <span className="text-xs text-gray-400">{date}</span>}
+          {open ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+        </div>
+      </button>
+
+      {open && (
+        <div className="px-4 py-4 space-y-2">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+            <span>From: <span className="font-medium text-gray-700">{from}</span></span>
+            {subject && <span>Subject: <span className="font-medium text-gray-700">{subject}</span></span>}
+          </div>
+          <pre className="whitespace-pre-wrap font-sans text-sm text-gray-700 leading-relaxed mt-2">
+            {body}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function RepliesPage() {
@@ -75,7 +144,7 @@ export default function RepliesPage() {
   const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all");
   const [sortOrder, setSortOrder] = useState<"high-to-low" | "low-to-high">("high-to-low");
 
-  // AI response edit state
+  // AI reply draft state
   const [draftSubject, setDraftSubject] = useState("");
   const [draftBody, setDraftBody] = useState("");
   const [savedIndicator, setSavedIndicator] = useState(false);
@@ -87,13 +156,11 @@ export default function RepliesPage() {
   const [isSending, setIsSending] = useState(false);
   const [isPolling, setIsPolling] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-
-  // Regen confirmation
   const [showRegenConfirm, setShowRegenConfirm] = useState(false);
+  const [pollToast, setPollToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
   // Textarea auto-resize
   const bodyRef = useRef<HTMLTextAreaElement>(null);
-
   useEffect(() => {
     if (bodyRef.current) {
       bodyRef.current.style.height = "auto";
@@ -109,7 +176,6 @@ export default function RepliesPage() {
     try {
       const { data } = await api.get<ReplyItem[]>("/replies");
       setReplies(data);
-      // Refresh the open reply from fresh data
       setOpen((prev) => (prev ? (data.find((r) => r.id === prev.id) ?? null) : null));
     } catch {
       setError("Failed to load replies. Please refresh.");
@@ -118,15 +184,30 @@ export default function RepliesPage() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  function showPollToast(msg: string, ok: boolean) {
+    setPollToast({ msg, ok });
+    setTimeout(() => setPollToast(null), 4000);
+  }
 
-  // Sync draft fields whenever the open reply changes (e.g. after load/generate)
+  // Auto-poll inbox + load replies on mount
+  useEffect(() => {
+    const init = async () => {
+      try {
+        await api.post("/replies/poll");
+      } catch {
+        // Silently skip if Gmail not connected yet
+      }
+      await load();
+    };
+    init();
+  }, [load]);
+
+  // Sync draft when open reply changes
   useEffect(() => {
     if (!open) return;
     const ai = open.ai_response;
     setDraftSubject(ai?.user_edited_subject ?? ai?.suggested_subject ?? "");
     setDraftBody(ai?.user_edited_body ?? ai?.suggested_body ?? "");
-    // Cancel any pending auto-save from the previous open item
     if (saveTimer.current) clearTimeout(saveTimer.current);
   }, [open?.id, open?.ai_response?.id]);
 
@@ -141,7 +222,6 @@ export default function RepliesPage() {
     setDraftBody(ai?.user_edited_body ?? ai?.suggested_body ?? "");
   }
 
-  // Schedule auto-save 800ms after user stops typing
   function scheduleAutoSave(subject: string, body: string) {
     if (!open?.ai_response) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -153,9 +233,7 @@ export default function RepliesPage() {
         });
         setSavedIndicator(true);
         setTimeout(() => setSavedIndicator(false), 2000);
-      } catch {
-        // Silent — user will see the error if they try to send
-      }
+      } catch { /* silent */ }
     }, 800);
   }
 
@@ -171,11 +249,7 @@ export default function RepliesPage() {
 
   async function handleGenerate(confirmed = false) {
     if (!open) return;
-    // If there's existing AI content and user hasn't confirmed regen, show dialog
-    if (!confirmed && open.ai_response) {
-      setShowRegenConfirm(true);
-      return;
-    }
+    if (!confirmed && open.ai_response) { setShowRegenConfirm(true); return; }
     setShowRegenConfirm(false);
     setIsGenerating(true);
     setActionError(null);
@@ -194,11 +268,7 @@ export default function RepliesPage() {
     setIsApproving(true);
     setActionError(null);
     try {
-      // Flush any pending auto-save before approving
-      if (saveTimer.current) {
-        clearTimeout(saveTimer.current);
-        saveTimer.current = null;
-      }
+      if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
       if (open.ai_response) {
         await api.patch(`/replies/${open.id}/response`, {
           user_edited_subject: draftSubject,
@@ -208,7 +278,7 @@ export default function RepliesPage() {
       await api.post(`/replies/${open.id}/response/approve`);
       await load();
     } catch {
-      setActionError("Failed to approve. Please try again.");
+      setActionError("Failed to approve.");
     } finally {
       setIsApproving(false);
     }
@@ -221,8 +291,9 @@ export default function RepliesPage() {
     try {
       await api.post(`/replies/${open.id}/response/send`);
       await load();
-    } catch {
-      setActionError("Failed to send reply. Please try again.");
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setActionError(msg || "Failed to send reply.");
     } finally {
       setIsSending(false);
     }
@@ -231,14 +302,24 @@ export default function RepliesPage() {
   async function handlePollInbox() {
     setIsPolling(true);
     try {
-      await api.post("/replies/poll");
-      setTimeout(() => { load(); setIsPolling(false); }, 3000);
-    } catch {
+      const { data } = await api.post<{ new: number; errors: string[] }>("/replies/poll");
+      await load();
+      if (data.errors?.length) {
+        showPollToast(`Poll error: ${data.errors[0]}`, false);
+      } else if (data.new === 0) {
+        showPollToast("Inbox checked — no new replies found.", true);
+      } else {
+        showPollToast(`Found ${data.new} new repl${data.new === 1 ? "y" : "ies"}!`, true);
+      }
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      showPollToast(msg || "Failed to check inbox.", false);
+    } finally {
       setIsPolling(false);
     }
   }
 
-  // ── Derived data ──────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
 
   const filtered = replies
     .filter((r) => sentimentFilter === "all" || r.sentiment === sentimentFilter)
@@ -257,15 +338,36 @@ export default function RepliesPage() {
 
   if (loading && replies.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64">
+      <div className="flex flex-col items-center justify-center h-64 gap-3">
         <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+        <p className="text-sm text-gray-500">Checking inbox for replies…</p>
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
-      {/* Error banner */}
+      {/* Poll result toast */}
+      <AnimatePresence>
+        {pollToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-sm ${
+              pollToast.ok
+                ? "bg-green-50 border-green-200 text-green-800"
+                : "bg-red-50 border-red-200 text-red-700"
+            }`}
+          >
+            {pollToast.ok
+              ? <CheckCheck className="h-4 w-4 shrink-0" />
+              : <AlertCircle className="h-4 w-4 shrink-0" />}
+            {pollToast.msg}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {error && (
         <div className="flex items-center gap-2 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
           <AlertCircle className="h-4 w-4 shrink-0" />
@@ -274,7 +376,7 @@ export default function RepliesPage() {
         </div>
       )}
 
-      {/* Top bar: sentiment filter tabs + sort toggle */}
+      {/* Top bar */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-1 rounded-lg bg-gray-100 p-1">
           {(["all", "positive", "neutral", "negative"] as const).map((tab) => (
@@ -282,47 +384,37 @@ export default function RepliesPage() {
               key={tab}
               onClick={() => setSentimentFilter(tab)}
               className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors capitalize ${
-                sentimentFilter === tab
-                  ? "bg-white text-gray-900 shadow-sm"
-                  : "text-gray-500 hover:text-gray-700"
+                sentimentFilter === tab ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
               }`}
             >
               {tab}
             </button>
           ))}
         </div>
-
         <div className="flex items-center gap-2">
           <button
             onClick={() => setSortOrder((s) => s === "high-to-low" ? "low-to-high" : "high-to-low")}
             className="flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
           >
             <ArrowUpDown className="h-3 w-3" />
-            {sortOrder === "high-to-low" ? "Priority: High → Low" : "Priority: Low → High"}
+            {sortOrder === "high-to-low" ? "High → Low" : "Low → High"}
           </button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handlePollInbox}
-            loading={isPolling}
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            Poll Inbox
+          <Button size="sm" variant="outline" onClick={handlePollInbox} loading={isPolling}>
+            <RefreshCw className="h-3.5 w-3.5 mr-1" />
+            {isPolling ? "Checking…" : "Check Inbox"}
           </Button>
         </div>
       </div>
 
-      {/* Main panel */}
+      {/* Main split panel */}
       <div className="flex h-[calc(100vh-210px)] bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
 
         {/* ── LEFT: reply list ── */}
         <div className={`flex flex-col border-r border-gray-200 transition-all duration-200 ${open ? "w-80 shrink-0" : "flex-1"}`}>
-          <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 bg-gray-50">
-            <span className="text-sm text-gray-500 flex-1">
-              {filtered.length} {sentimentFilter !== "all" ? sentimentFilter : ""} repl{filtered.length !== 1 ? "ies" : "y"}
-            </span>
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 bg-gray-50 text-xs text-gray-500">
+            <span className="flex-1">{filtered.length} repl{filtered.length !== 1 ? "ies" : "y"}</span>
             <button onClick={load} className="text-gray-400 hover:text-gray-700 transition-colors">
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw className="h-3.5 w-3.5" />
             </button>
           </div>
 
@@ -331,7 +423,7 @@ export default function RepliesPage() {
               <div className="flex flex-col items-center justify-center h-full text-gray-400 py-16">
                 <InboxIcon className="h-10 w-10 mb-3 opacity-30" />
                 <p className="font-medium text-sm">No replies yet</p>
-                <p className="text-xs mt-1">Poll the inbox to check for new replies</p>
+                <p className="text-xs mt-1 text-center px-4">Click "Check Inbox" above to poll your Gmail for new replies</p>
               </div>
             ) : (
               filtered.map((reply) => (
@@ -342,14 +434,12 @@ export default function RepliesPage() {
                     open?.id === reply.id ? "bg-indigo-50 border-l-2 border-l-indigo-500" : ""
                   }`}
                 >
-                  {/* Priority dot */}
                   <div className="mt-1.5 shrink-0">
                     <span className={`block h-2 w-2 rounded-full ${
                       reply.priority === "high" ? "bg-green-500" :
                       reply.priority === "low" ? "bg-red-400" : "bg-yellow-400"
                     }`} />
                   </div>
-
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2 mb-0.5">
                       <p className="text-sm font-semibold text-gray-900 truncate">
@@ -357,14 +447,18 @@ export default function RepliesPage() {
                       </p>
                       <span className="text-xs text-gray-400 shrink-0">{timeAgo(reply.received_at)}</span>
                     </div>
-                    <p className="text-xs text-gray-600 truncate">{reply.subject || "(no subject)"}</p>
-                    <div className="flex items-center gap-2 mt-1">
+                    <p className="text-xs text-gray-500 truncate">{reply.blog_name || reply.from_email}</p>
+                    <p className="text-xs text-gray-600 truncate mt-0.5">{reply.subject || "(no subject)"}</p>
+                    <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                       <SentimentBadge sentiment={reply.sentiment} />
                       {reply.ai_response?.is_sent && (
-                        <span className="text-[10px] text-indigo-600 font-medium">Replied</span>
+                        <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-medium">Replied</span>
                       )}
                       {reply.ai_response?.is_approved && !reply.ai_response.is_sent && (
-                        <span className="text-[10px] text-green-600 font-medium">Approved</span>
+                        <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded font-medium">Approved</span>
+                      )}
+                      {!reply.ai_response && (
+                        <span className="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">Needs reply</span>
                       )}
                     </div>
                   </div>
@@ -374,7 +468,7 @@ export default function RepliesPage() {
           </div>
         </div>
 
-        {/* ── RIGHT: thread + AI response editor ── */}
+        {/* ── RIGHT: thread + AI editor ── */}
         <AnimatePresence>
           {open && (
             <motion.div
@@ -385,125 +479,76 @@ export default function RepliesPage() {
               transition={{ duration: 0.18 }}
             >
               {/* Header */}
-              <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100 bg-white shrink-0">
+              <div className="flex items-start gap-3 px-6 py-4 border-b border-gray-100 bg-white shrink-0">
                 <button
                   onClick={() => setOpen(null)}
-                  className="text-gray-400 hover:text-gray-700 transition-colors lg:hidden"
+                  className="text-gray-400 hover:text-gray-700 transition-colors lg:hidden mt-0.5"
                 >
                   <ChevronLeft className="h-5 w-5" />
                 </button>
                 <div className="flex-1 min-w-0">
-                  <h2 className="text-base font-semibold text-gray-900 truncate">
-                    {open.subject || "(no subject)"}
-                  </h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    From: <span className="font-medium text-gray-600">{open.from_name || open.from_email}</span>
-                    {open.from_name && <span className="ml-1 text-gray-400">&lt;{open.from_email}&gt;</span>}
-                  </p>
-                </div>
-                <SentimentBadge sentiment={open.sentiment} />
-              </div>
-
-              {/* Scrollable body */}
-              <div className="flex-1 overflow-y-auto">
-
-                {/* §1 — Original outreach email */}
-                <div className="px-6 pt-5 pb-4 border-b border-gray-100">
-                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
-                    Original Email Sent
-                  </p>
-                  <p className="text-xs text-gray-500 mb-1">
-                    Subject: <span className="font-medium text-gray-700">{open.outreach_subject || "—"}</span>
-                  </p>
-                  {open.blog_name && (
-                    <p className="text-xs text-gray-400">Blog: {open.blog_name}</p>
-                  )}
-                </div>
-
-                {/* §2 — Their reply */}
-                <div className="px-6 pt-5 pb-4 border-b border-gray-100">
-                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
-                    Their Reply
-                  </p>
-                  <p className="text-xs text-gray-500 mb-3">
-                    {new Date(open.received_at).toLocaleString()}
-                  </p>
-                  <pre className="whitespace-pre-wrap font-sans text-sm text-gray-700 leading-relaxed">
-                    {open.body}
-                  </pre>
-                </div>
-
-                {/* §3 — AI Suggested Response */}
-                <div className="px-6 pt-5 pb-6">
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                      AI Suggested Response
-                    </p>
-
-                    {/* Action error */}
-                    {actionError && (
-                      <span className="text-xs text-red-600 flex items-center gap-1">
-                        <AlertCircle className="h-3 w-3" /> {actionError}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-base font-semibold text-gray-900 truncate">
+                      {open.from_name || open.from_email}
+                    </h2>
+                    <SentimentBadge sentiment={open.sentiment} />
+                  </div>
+                  <div className="flex items-center gap-3 mt-0.5 flex-wrap text-xs text-gray-400">
+                    <span>{open.from_email}</span>
+                    {open.blog_name && (
+                      <span className="flex items-center gap-1">
+                        ·
+                        {open.blog_url ? (
+                          <a href={open.blog_url} target="_blank" rel="noopener noreferrer"
+                            className="text-indigo-500 hover:underline flex items-center gap-0.5">
+                            {open.blog_name} <ExternalLink className="h-2.5 w-2.5" />
+                          </a>
+                        ) : open.blog_name}
                       </span>
                     )}
+                    <span>· {new Date(open.received_at).toLocaleString()}</span>
                   </div>
+                </div>
+              </div>
 
-                  {/* Regenerate confirmation dialog */}
-                  {showRegenConfirm && (
-                    <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm">
-                      <p className="font-medium text-amber-800 mb-2">
-                        Regenerate will overwrite your current edits. Continue?
-                      </p>
-                      <div className="flex gap-2">
-                        <Button size="sm" onClick={() => handleGenerate(true)} loading={isGenerating}>
-                          Yes, regenerate
-                        </Button>
-                        <Button size="sm" variant="ghost" onClick={() => setShowRegenConfirm(false)}>
-                          Cancel
-                        </Button>
-                      </div>
-                    </div>
-                  )}
+              {/* Scrollable thread */}
+              <div className="flex-1 overflow-y-auto">
+                <div className="px-6 py-5 space-y-4">
 
-                  {open.ai_response === null ? (
-                    /* No AI response yet — show generate button */
-                    <div className="flex flex-col items-center gap-3 py-8 text-center">
-                      <Sparkles className="h-8 w-8 text-indigo-400 opacity-60" />
-                      <p className="text-sm text-gray-500">No AI response generated yet.</p>
-                      <Button onClick={() => handleGenerate(false)} loading={isGenerating}>
-                        <Sparkles className="h-4 w-4" /> Generate AI Response
-                      </Button>
-                    </div>
-                  ) : (
-                    /* Editable AI response form */
-                    <div className="space-y-3">
-                      {/* Subject */}
-                      <div>
-                        <label className="text-xs text-gray-500 mb-1 block">Subject</label>
-                        <Input
-                          value={draftSubject}
-                          onChange={(e) => handleSubjectChange(e.target.value)}
-                          className="ring-2 ring-blue-500 focus:ring-blue-500"
-                        />
-                      </div>
+                  {/* 1. Original outreach email (collapsible) */}
+                  <EmailBubble
+                    label="Your Outreach Email"
+                    from={`you → ${open.lead_email || open.from_email}`}
+                    subject={open.outreach_subject}
+                    body={open.outreach_body || "(email body not available)"}
+                    defaultOpen={false}
+                    accent="indigo"
+                  />
 
-                      {/* Body */}
-                      <div>
-                        <label className="text-xs text-gray-500 mb-1 block">Body</label>
-                        <Textarea
-                          ref={bodyRef}
-                          value={draftBody}
-                          onChange={(e) => handleBodyChange(e.target.value)}
-                          rows={8}
-                          className="ring-2 ring-blue-500 focus:ring-blue-500 resize-none overflow-hidden"
-                        />
-                      </div>
+                  {/* 2. Their reply (open by default) */}
+                  <EmailBubble
+                    label="Their Reply"
+                    from={open.from_name ? `${open.from_name} <${open.from_email}>` : open.from_email}
+                    date={timeAgo(open.received_at)}
+                    subject={open.subject}
+                    body={open.body}
+                    defaultOpen={true}
+                    accent="gray"
+                  />
 
-                      {/* Draft label + saved indicator */}
-                      <div className="flex items-center gap-3">
-                        <span className={`text-xs font-medium ${isEdited ? "text-amber-600" : "text-gray-400"}`}>
-                          {isEdited ? "Edited" : "AI draft"}
+                  {/* 3. AI Response Editor */}
+                  <div className="rounded-lg border border-blue-200 bg-blue-50/30 overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-blue-100 bg-blue-50">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="h-4 w-4 text-blue-600" />
+                        <span className="text-xs font-semibold text-blue-800 uppercase tracking-wide">
+                          Your Reply
                         </span>
+                        {open.ai_response && (
+                          <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${isEdited ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                            {isEdited ? "Edited" : "AI draft"}
+                          </span>
+                        )}
                         <AnimatePresence>
                           {savedIndicator && (
                             <motion.span
@@ -518,42 +563,106 @@ export default function RepliesPage() {
                         </AnimatePresence>
                       </div>
 
-                      {/* Action buttons */}
-                      <div className="flex items-center gap-2 pt-2 flex-wrap">
-                        {!showRegenConfirm && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => handleGenerate(false)}
-                            loading={isGenerating}
-                          >
-                            <Sparkles className="h-3 w-3" /> Regenerate
-                          </Button>
-                        )}
-
-                        <Button
-                          size="sm"
-                          variant={open.ai_response.is_approved ? "secondary" : "default"}
-                          onClick={handleApprove}
-                          loading={isApproving}
-                          disabled={open.ai_response.is_sent}
-                        >
-                          <CheckCheck className="h-3 w-3" />
-                          {open.ai_response.is_approved ? "Approved" : "Approve"}
-                        </Button>
-
-                        <Button
-                          size="sm"
-                          onClick={handleSend}
-                          loading={isSending}
-                          disabled={!open.ai_response.is_approved || open.ai_response.is_sent}
-                        >
-                          <Send className="h-3 w-3" />
-                          {open.ai_response.is_sent ? "Sent" : "Send Reply"}
-                        </Button>
-                      </div>
+                      {actionError && (
+                        <span className="text-xs text-red-600 flex items-center gap-1">
+                          <AlertCircle className="h-3 w-3" /> {actionError}
+                        </span>
+                      )}
                     </div>
-                  )}
+
+                    <div className="px-4 py-4">
+                      {/* Regenerate confirm */}
+                      {showRegenConfirm && (
+                        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm">
+                          <p className="font-medium text-amber-800 mb-2">
+                            Regenerate will overwrite your edits. Continue?
+                          </p>
+                          <div className="flex gap-2">
+                            <Button size="sm" onClick={() => handleGenerate(true)} loading={isGenerating}>
+                              Yes, regenerate
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => setShowRegenConfirm(false)}>
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+
+                      {open.ai_response === null ? (
+                        <div className="flex flex-col items-center gap-3 py-8 text-center">
+                          <Sparkles className="h-8 w-8 text-blue-400 opacity-60" />
+                          <p className="text-sm text-gray-500">
+                            Generate an AI-written reply to this email — then edit it before sending.
+                          </p>
+                          <Button onClick={() => handleGenerate(false)} loading={isGenerating} className="gap-2">
+                            <Sparkles className="h-4 w-4" /> Generate AI Reply
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-gray-600">Subject</label>
+                            <Input
+                              value={draftSubject}
+                              onChange={(e) => handleSubjectChange(e.target.value)}
+                              disabled={open.ai_response.is_sent}
+                              className="ring-2 ring-blue-400 focus:ring-blue-500 disabled:opacity-60"
+                            />
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-gray-600">Body — edit freely before sending</label>
+                            <Textarea
+                              ref={bodyRef}
+                              value={draftBody}
+                              onChange={(e) => handleBodyChange(e.target.value)}
+                              rows={8}
+                              disabled={open.ai_response.is_sent}
+                              className="ring-2 ring-blue-400 focus:ring-blue-500 resize-none overflow-hidden disabled:opacity-60"
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-2 pt-1 flex-wrap">
+                            {!showRegenConfirm && !open.ai_response.is_sent && (
+                              <Button size="sm" variant="outline" onClick={() => handleGenerate(false)} loading={isGenerating}>
+                                <Sparkles className="h-3 w-3 mr-1" /> Regenerate
+                              </Button>
+                            )}
+
+                            {!open.ai_response.is_sent && (
+                              <Button
+                                size="sm"
+                                variant={open.ai_response.is_approved ? "secondary" : "default"}
+                                onClick={handleApprove}
+                                loading={isApproving}
+                              >
+                                <CheckCheck className="h-3 w-3 mr-1" />
+                                {open.ai_response.is_approved ? "Approved" : "Approve"}
+                              </Button>
+                            )}
+
+                            <Button
+                              size="sm"
+                              onClick={handleSend}
+                              loading={isSending}
+                              disabled={!open.ai_response.is_approved || open.ai_response.is_sent}
+                              className={open.ai_response.is_sent ? "opacity-60" : ""}
+                            >
+                              <Send className="h-3 w-3 mr-1" />
+                              {open.ai_response.is_sent ? "Sent" : "Send Reply"}
+                            </Button>
+                          </div>
+
+                          {open.ai_response.is_sent && (
+                            <p className="text-xs text-indigo-600 font-medium flex items-center gap-1">
+                              <CheckCheck className="h-3.5 w-3.5" /> Reply sent via Gmail
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
                 </div>
               </div>
             </motion.div>

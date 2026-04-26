@@ -6,6 +6,7 @@ from db.models import Lead, ValidityStatus
 from tools.scraper import scrape_emails
 
 _SCRAPE_CONCURRENCY = 10
+_MAX_LEADS_PER_CAMPAIGN = 20
 
 
 async def run_scraper_agent(
@@ -54,10 +55,14 @@ async def run_scraper_agent(
 
     new_count = 0
     seen_in_batch: set[str] = set()
+    slots_left = _MAX_LEADS_PER_CAMPAIGN - len(existing_emails)
 
     for email, source_id in all_results:
+        if slots_left <= 0:
+            print(f"[scraper_agent] Lead cap ({_MAX_LEADS_PER_CAMPAIGN}) reached — stopping")
+            break
         if email in existing_emails or email in seen_in_batch:
-            continue  # skip — don't store duplicates at all
+            continue
 
         seen_in_batch.add(email)
         existing_emails.add(email)
@@ -70,6 +75,7 @@ async def run_scraper_agent(
             is_duplicate=False,
         ))
         new_count += 1
+        slots_left -= 1
 
     await db.commit()
     return new_count

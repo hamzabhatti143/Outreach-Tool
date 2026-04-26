@@ -48,12 +48,13 @@ class User(Base):
     name = Column(String(255), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
-    # Per-user SMTP settings — override the global .env defaults
-    smtp_host = Column(String(255), nullable=True)
-    smtp_port = Column(Integer, nullable=True)
-    smtp_user = Column(String(255), nullable=True)   # the "from" email address
-    smtp_pass = Column(String(500), nullable=True)   # Gmail app password
-    smtp_from_name = Column(String(255), nullable=True)
+    # Per-user Gmail OAuth credentials (user brings their own Google Cloud project)
+    google_client_id = Column(String(500), nullable=True)
+    google_client_secret = Column(String(500), nullable=True)
+    google_redirect_uri = Column(String(500), nullable=True)
+    gmail_access_token = Column(Text, nullable=True)
+    gmail_refresh_token = Column(Text, nullable=True)
+    gmail_token_expiry = Column(DateTime, nullable=True)
 
     campaigns = relationship("Campaign", back_populates="user", cascade="all, delete-orphan")
 
@@ -146,6 +147,7 @@ class SentLog(Base):
     open_count = Column(Integer, default=0, nullable=False)
     last_opened_at = Column(DateTime, nullable=True)
     retry_count = Column(Integer, default=0, nullable=False)
+    gmail_thread_id = Column(String(255), nullable=True)
 
     outreach_email = relationship("OutreachEmail", back_populates="sent_logs")
 
@@ -161,10 +163,9 @@ class EmailReply(Base):
     body = Column(Text, nullable=False)
     received_at = Column(DateTime, server_default=func.now())
     message_id = Column(String(500), nullable=True, unique=True)
-    # Sentiment analysis fields
-    sentiment = Column(String(20), nullable=True)        # positive | neutral | negative
-    sentiment_score = Column(Float, nullable=True)       # 0.0 – 1.0
-    priority = Column(String(20), nullable=True)         # high | medium | low
+    sentiment = Column(String(20), nullable=True)
+    sentiment_score = Column(Float, nullable=True)
+    priority = Column(String(20), nullable=True)
 
     outreach_email = relationship("OutreachEmail", back_populates="replies")
     ai_response = relationship(

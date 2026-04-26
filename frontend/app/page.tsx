@@ -5,7 +5,7 @@ import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Search, Mail, Send, BarChart2, Shield, Zap,
-  ArrowRight, CheckCircle, Globe, Users
+  ArrowRight, CheckCircle, Globe, Users, ExternalLink
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -194,6 +194,111 @@ export default function LandingPage() {
                 </motion.div>
               ))}
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Gmail Setup Guide */}
+      <section className="py-20 px-6">
+        <div className="mx-auto max-w-4xl">
+          <div className="text-center mb-14">
+            <span className="inline-block rounded-full bg-indigo-50 px-4 py-1.5 text-sm font-medium text-indigo-700 mb-4">
+              One-time setup
+            </span>
+            <h2 className="text-3xl font-bold text-gray-900 mb-4">Connect your Gmail in 4 steps</h2>
+            <p className="text-gray-600 max-w-2xl mx-auto">
+              OutreachAI uses the official Gmail API to send from your own account. You bring your own Google Cloud project — no shared keys, full control.
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-8 items-start">
+            {/* Steps */}
+            <div className="space-y-5">
+              {[
+                {
+                  n: "1",
+                  title: "Create a Google Cloud Project",
+                  desc: "Go to console.cloud.google.com → New Project. Then go to APIs & Services → Library, search Gmail API, and click Enable.",
+                },
+                {
+                  n: "2",
+                  title: "Configure OAuth Consent Screen",
+                  desc: 'APIs & Services → OAuth consent screen → External. Add the gmail.send scope. Add your Gmail as a Test User so you can use it before verification.',
+                },
+                {
+                  n: "3",
+                  title: "Create OAuth Credentials",
+                  desc: 'APIs & Services → Credentials → Create Credentials → OAuth Client ID. Choose "Web application". Add your backend callback URL as an Authorized Redirect URI. Download credentials.json.',
+                },
+                {
+                  n: "4",
+                  title: "Connect in Settings",
+                  desc: "Sign up, go to Settings → Gmail API, upload credentials.json (or paste Client ID + Secret), then click Connect Gmail Account to authorize.",
+                },
+              ].map((step) => (
+                <motion.div
+                  key={step.n}
+                  className="flex gap-4"
+                  initial={{ opacity: 0, x: -16 }}
+                  whileInView={{ opacity: 1, x: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ delay: Number(step.n) * 0.1 }}
+                >
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white font-bold text-sm">
+                    {step.n}
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900 text-sm">{step.title}</p>
+                    <p className="text-sm text-gray-600 mt-0.5">{step.desc}</p>
+                  </div>
+                </motion.div>
+              ))}
+
+              <a
+                href="https://console.cloud.google.com/apis/credentials"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 mt-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
+              >
+                <ExternalLink className="h-4 w-4" />
+                Open Google Cloud Console
+              </a>
+            </div>
+
+            {/* Info card */}
+            <motion.div
+              className="rounded-xl border border-indigo-100 bg-indigo-50 p-6 space-y-4"
+              initial={{ opacity: 0, y: 16 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+            >
+              <div className="flex items-center gap-2 text-indigo-800 font-semibold">
+                <Mail className="h-5 w-5" />
+                Why Gmail API?
+              </div>
+              <p className="text-sm text-indigo-900 leading-relaxed">
+                The Gmail API uses OAuth 2.0 — the same standard Google uses for "Sign in with Google." You grant permission once and OutreachAI can send on your behalf. You keep full control and can revoke access any time.
+              </p>
+              <hr className="border-indigo-200" />
+              <div className="space-y-2 text-sm text-indigo-900">
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="h-4 w-4 shrink-0 text-green-600 mt-0.5" />
+                  Emails come from your own Gmail address
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="h-4 w-4 shrink-0 text-green-600 mt-0.5" />
+                  No password ever stored — just short-lived OAuth tokens
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="h-4 w-4 shrink-0 text-green-600 mt-0.5" />
+                  Tokens auto-refresh — no re-login needed
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="h-4 w-4 shrink-0 text-green-600 mt-0.5" />
+                  Reply tracking via Gmail threads — no IMAP needed
+                </div>
+              </div>
+            </motion.div>
           </div>
         </div>
       </section>

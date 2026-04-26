@@ -1,34 +1,33 @@
 import os
 import json
-import asyncio
-import smtplib
+import base64
 import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
+
 from db.database import get_db, AsyncSessionLocal
 from db.models import EmailReply, AIResponse, OutreachEmail, Lead, BlogSource, Campaign, User
 from utils.auth import get_current_user_id
+from routers.gmail import _get_valid_token
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/replies", tags=["replies"])
 
-_openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
-
-# Global .env fallbacks used when the user hasn't saved their own SMTP settings
-_ENV_SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-_ENV_SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-_ENV_SMTP_USER = os.getenv("SMTP_USER", "")
-_ENV_SMTP_PASS = os.getenv("SMTP_PASS", "")
-_ENV_SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Outreach Tool")
+_openai = AsyncOpenAI(
+    api_key=os.getenv("GEMINI_API_KEY", ""),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+)
 
 _REPLY_SYSTEM = (
     "You are an expert email response specialist. "
@@ -84,7 +83,10 @@ class ReplyResponse(BaseModel):
     sentiment_score: float | None
     priority: str | None
     outreach_subject: str | None
+    outreach_body: str | None
+    lead_email: str | None
     blog_name: str | None
+    blog_url: str | None
     ai_response: AIResponseSchema | None
 
     class Config:
@@ -158,7 +160,10 @@ async def _enrich_replies(replies: list, db: AsyncSession) -> list[ReplyResponse
             sentiment_score=r.sentiment_score,
             priority=r.priority,
             outreach_subject=oe.subject if oe else None,
+            outreach_body=oe.body if oe else None,
+            lead_email=lead.email if lead else None,
             blog_name=blog.blog_name if blog else None,
+            blog_url=blog.url if blog else None,
             ai_response=ai_schema,
         ))
 
@@ -168,90 +173,77 @@ async def _enrich_replies(replies: list, db: AsyncSession) -> list[ReplyResponse
 async def _generate_ai_reply(reply: EmailReply, outreach: OutreachEmail | None) -> dict:
     prompt = _REPLY_USER.format(
         original_subject=outreach.subject if outreach else "",
-        original_body=outreach.body[:500] if outreach else "",
+        original_body=outreach.body[:2000] if outreach else "",
         from_name=reply.from_name or reply.from_email,
         from_email=reply.from_email,
         reply_subject=reply.subject or "",
         reply_body=reply.body[:1000],
     )
     resp = await _openai.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gemini-2.0-flash",
         messages=[
             {"role": "system", "content": _REPLY_SYSTEM},
             {"role": "user", "content": prompt},
         ],
         max_tokens=600,
         temperature=0.7,
-        response_format={"type": "json_object"},
     )
     raw = resp.choices[0].message.content or "{}"
+    # Strip markdown fences if present
+    import re as _re
+    fenced = _re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
+    if fenced:
+        raw = fenced.group(1)
     data = json.loads(raw)
     fallback = f"Re: {outreach.subject}" if outreach else "Re: Your reply"
     return {"subject": data.get("subject", fallback), "body": data.get("body", "")}
 
 
-def _smtp_send_sync(to: str, subject: str, body: str, smtp: dict) -> None:
-    """Synchronous SMTP send — called via run_in_executor."""
-    msg = MIMEMultipart("alternative")
-    msg["From"] = f"{smtp['from_name']} <{smtp['user']}>"
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-    with smtplib.SMTP(smtp["host"], smtp["port"], timeout=10) as server:
-        server.starttls()
-        server.login(smtp["user"], smtp["pass"])
-        server.sendmail(smtp["user"], to, msg.as_string())
+async def _send_reply_via_gmail(reply_id: int, to: str, subject: str, body: str) -> None:
+    """Background task: load user Gmail token, send reply via Gmail API, mark is_sent."""
+    async with AsyncSessionLocal() as db:
+        # Walk reply → outreach → campaign → user
+        reply = await db.get(EmailReply, reply_id)
+        if not reply:
+            return
+        oe = await db.get(OutreachEmail, reply.outreach_email_id)
+        camp = await db.get(Campaign, oe.campaign_id) if oe else None
+        user = await db.get(User, camp.user_id) if camp else None
 
+        if not user or not user.gmail_refresh_token:
+            logger.error("Cannot send reply %s — Gmail not connected", reply_id)
+            return
 
-async def _load_smtp_for_reply(reply_id: int) -> dict:
-    """
-    Walk reply → outreach_email → campaign → user to load per-user SMTP.
-    Falls back to global .env values if the user has no SMTP configured.
-    """
-    smtp = {
-        "host": _ENV_SMTP_HOST, "port": _ENV_SMTP_PORT,
-        "user": _ENV_SMTP_USER, "pass": _ENV_SMTP_PASS,
-        "from_name": _ENV_SMTP_FROM_NAME,
-    }
-    try:
-        async with AsyncSessionLocal() as db:
-            reply = await db.get(EmailReply, reply_id)
-            if reply:
-                oe = await db.get(OutreachEmail, reply.outreach_email_id)
-                if oe:
-                    camp = await db.get(Campaign, oe.campaign_id)
-                    if camp:
-                        user = await db.get(User, camp.user_id)
-                        if user:
-                            smtp = {
-                                "host": user.smtp_host or _ENV_SMTP_HOST,
-                                "port": user.smtp_port or _ENV_SMTP_PORT,
-                                "user": user.smtp_user or _ENV_SMTP_USER,
-                                "pass": user.smtp_pass or _ENV_SMTP_PASS,
-                                "from_name": user.smtp_from_name or _ENV_SMTP_FROM_NAME,
-                            }
-    except Exception as exc:
-        logger.error("Failed to load user SMTP for reply_id=%s: %s", reply_id, exc)
-    return smtp
+        try:
+            access_token = await _get_valid_token(user, db)
 
+            msg = MIMEMultipart("alternative")
+            msg["From"] = user.email
+            msg["To"] = to
+            msg["Subject"] = subject
+            msg.attach(MIMEText(body, "plain"))
 
-async def _send_and_mark(reply_id: int, to: str, subject: str, body: str) -> None:
-    """Background coroutine: load user SMTP, send reply, then mark is_sent = True."""
-    smtp = await _load_smtp_for_reply(reply_id)
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: _smtp_send_sync(to, subject, body, smtp))
-    except Exception as exc:
-        logger.error("Reply send failed for reply_id=%s: %s", reply_id, exc)
-        return
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    json={"raw": raw},
+                )
 
-    async with AsyncSessionLocal() as session:
-        ar_res = await session.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
+            if r.status_code >= 400:
+                raise ValueError(f"Gmail API error {r.status_code}: {r.text}")
+
+        except Exception as exc:
+            logger.error("Reply send failed for reply_id=%s: %s", reply_id, exc)
+            return
+
+        ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
         ar_obj = ar_res.scalar_one_or_none()
         if ar_obj:
             ar_obj.is_sent = True
-            await session.commit()
+            await db.commit()
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -263,7 +255,6 @@ async def get_stats(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> StatsResponse:
-    """Stats for the sidebar badge."""
     total_res = await db.execute(select(func.count(EmailReply.id)))
     total = total_res.scalar() or 0
 
@@ -293,13 +284,12 @@ async def list_replies(
 
 @router.post("/poll")
 async def poll_inbox_endpoint(
-    background_tasks: BackgroundTasks,
     user_id: int = Depends(get_current_user_id),
 ) -> dict:
-    """Trigger an IMAP inbox poll in the background."""
+    """Poll Gmail threads synchronously and return results."""
     from tools.reply_tracker import poll_inbox
-    background_tasks.add_task(poll_inbox)
-    return {"message": "Inbox poll queued"}
+    result = await poll_inbox(user_id)
+    return result
 
 
 @router.get("/{reply_id}", response_model=ReplyResponse)
@@ -322,7 +312,6 @@ async def generate_response(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Generate (or regenerate) an AI suggested reply. Resets any user edits."""
     result = await db.execute(select(EmailReply).where(EmailReply.id == reply_id))
     reply = result.scalar_one_or_none()
     if not reply:
@@ -369,10 +358,6 @@ async def edit_response(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """
-    Auto-save user edits.
-    Writes into user_edited_* columns; suggested_* columns are never touched.
-    """
     ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
     ar = ar_res.scalar_one_or_none()
     if not ar:
@@ -380,7 +365,6 @@ async def edit_response(
             status_code=404,
             detail="No AI response for this reply. Generate one first.",
         )
-
     ar.user_edited_subject = req.user_edited_subject
     ar.user_edited_body = req.user_edited_body
     await db.commit()
@@ -397,7 +381,6 @@ async def approve_response(
     ar = ar_res.scalar_one_or_none()
     if not ar:
         raise HTTPException(status_code=404, detail="AI response not found")
-
     ar.is_approved = True
     await db.commit()
     return {"reply_id": reply_id, "approved": True}
@@ -406,15 +389,9 @@ async def approve_response(
 @router.post("/{reply_id}/response/send")
 async def send_response(
     reply_id: int,
-    background_tasks: BackgroundTasks,
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """
-    Send the reply via SMTP.
-    Uses user_edited_* if present, falls back to suggested_*.
-    Requires is_approved == True.
-    """
     result = await db.execute(select(EmailReply).where(EmailReply.id == reply_id))
     reply = result.scalar_one_or_none()
     if not reply:
@@ -430,5 +407,5 @@ async def send_response(
     subject = ar.user_edited_subject or ar.suggested_subject or ""
     body = ar.user_edited_body or ar.suggested_body or ""
 
-    background_tasks.add_task(_send_and_mark, reply_id, reply.from_email, subject, body)
-    return {"message": "Reply queued for sending", "reply_id": reply_id}
+    await _send_reply_via_gmail(reply_id, reply.from_email, subject, body)
+    return {"message": "Reply sent", "reply_id": reply_id}

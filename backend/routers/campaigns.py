@@ -14,6 +14,9 @@ from datetime import datetime
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
+# Campaigns whose pipeline should abort at the next checkpoint
+_stop_requested: set[int] = set()
+
 
 class CampaignCreate(BaseModel):
     niche: str
@@ -30,6 +33,11 @@ class CampaignResponse(BaseModel):
     class Config:
         from_attributes = True
 
+    @classmethod
+    def from_campaign(cls, c: "Campaign") -> "CampaignResponse":
+        status_val = c.status.value if hasattr(c.status, "value") else str(c.status)
+        return cls(id=c.id, niche=c.niche, name=c.name, status=status_val, created_at=c.created_at)
+
 
 @router.get("", response_model=list[CampaignResponse])
 async def list_campaigns(
@@ -39,7 +47,7 @@ async def list_campaigns(
     result = await db.execute(
         select(Campaign).where(Campaign.user_id == user_id).order_by(Campaign.created_at.desc())
     )
-    return [CampaignResponse.model_validate(c) for c in result.scalars().all()]
+    return [CampaignResponse.from_campaign(c) for c in result.scalars().all()]
 
 
 @router.post("", response_model=CampaignResponse, status_code=status.HTTP_201_CREATED)
@@ -52,7 +60,7 @@ async def create_campaign(
     db.add(campaign)
     await db.flush()
     await db.commit()
-    return CampaignResponse.model_validate(campaign)
+    return CampaignResponse.from_campaign(campaign)
 
 
 @router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -71,14 +79,14 @@ async def delete_campaign(
     await db.commit()
 
 
-async def _run_pipeline(campaign_id: int, niche: str) -> None:
+async def _run_pipeline(campaign_id: int, niche: str, user_id: int | None = None) -> None:
     """
     Resumable pipeline: each step checks existing data and skips if already done.
     Order: research → scrape (new sources only) → write (new leads only) → validate (unverified only)
     """
-    from db.database import AsyncSessionLocal
+    from db.database import retry_session
 
-    async with AsyncSessionLocal() as db:
+    async with retry_session() as db:
         result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
         campaign = result.scalar_one_or_none()
         if not campaign:
@@ -86,6 +94,19 @@ async def _run_pipeline(campaign_id: int, niche: str) -> None:
 
         campaign.status = CampaignStatus.running
         await db.commit()
+
+        async def _check_stop() -> bool:
+            """Return True (and reset status) if a stop was requested."""
+            if campaign_id not in _stop_requested:
+                return False
+            _stop_requested.discard(campaign_id)
+            res = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+            c = res.scalar_one_or_none()
+            if c:
+                c.status = CampaignStatus.idle
+                await db.commit()
+            print(f"[pipeline] Campaign {campaign_id} stopped by user request")
+            return True
 
         try:
             # ── Step 1: Research ──────────────────────────────────────────
@@ -99,8 +120,10 @@ async def _run_pipeline(campaign_id: int, niche: str) -> None:
                 print(f"[pipeline] Skipping research — {len(existing_sources)} sources already exist")
                 sources = [{"id": s.id, "url": s.url, "blog_name": s.blog_name} for s in existing_sources]
             else:
-                sources = await run_research_agent(niche, campaign_id, db)
+                sources = await run_research_agent(niche, campaign_id, db, user_id=user_id)
                 print(f"[pipeline] Research found {len(sources)} sources")
+
+            if await _check_stop(): return
 
             # ── Step 2: Scrape ────────────────────────────────────────────
             # Only scrape sources that have no leads associated yet.
@@ -119,10 +142,14 @@ async def _run_pipeline(campaign_id: int, niche: str) -> None:
             else:
                 print(f"[pipeline] Skipping scrape — all sources already scraped")
 
+            if await _check_stop(): return
+
             # ── Step 3: Write ─────────────────────────────────────────────
             # Writer agent skips leads that already have a pending/approved/sent email.
             generated = await run_writer_agent(campaign_id, niche, db)
             print(f"[pipeline] Generated {generated} new outreach emails")
+
+            if await _check_stop(): return
 
             # ── Step 4: Validate ──────────────────────────────────────────
             # Only validate leads still marked unverified.
@@ -150,6 +177,7 @@ async def _run_pipeline(campaign_id: int, niche: str) -> None:
                 print(f"[pipeline] Skipping validation — no unverified leads")
 
             # Mark complete
+            _stop_requested.discard(campaign_id)
             result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
             campaign = result.scalar_one_or_none()
             if campaign:
@@ -157,12 +185,52 @@ async def _run_pipeline(campaign_id: int, niche: str) -> None:
             await db.commit()
 
         except Exception as e:
+            _stop_requested.discard(campaign_id)
             result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
             campaign = result.scalar_one_or_none()
             if campaign:
                 campaign.status = CampaignStatus.error
             await db.commit()
             print(f"[pipeline] Error for campaign {campaign_id}: {e}")
+
+
+@router.get("/{campaign_id}/stats")
+async def campaign_stats(
+    campaign_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user_id)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    sources_res = await db.execute(
+        select(func.count(BlogSource.id)).where(BlogSource.campaign_id == campaign_id)
+    )
+    leads_res = await db.execute(
+        select(func.count(Lead.id)).where(Lead.campaign_id == campaign_id)
+    )
+    pending_res = await db.execute(
+        select(func.count(OutreachEmail.id)).where(
+            OutreachEmail.campaign_id == campaign_id,
+            OutreachEmail.status == OutreachStatus.pending,
+        )
+    )
+    approved_res = await db.execute(
+        select(func.count(OutreachEmail.id)).where(
+            OutreachEmail.campaign_id == campaign_id,
+            OutreachEmail.status == OutreachStatus.approved,
+        )
+    )
+
+    return {
+        "sources": sources_res.scalar() or 0,
+        "leads": leads_res.scalar() or 0,
+        "pending_outreach": pending_res.scalar() or 0,
+        "approved_outreach": approved_res.scalar() or 0,
+    }
 
 
 @router.post("/{campaign_id}/run", status_code=status.HTTP_202_ACCEPTED)
@@ -181,5 +249,51 @@ async def run_campaign(
     if campaign.status == CampaignStatus.running:
         raise HTTPException(status_code=409, detail="Campaign is already running")
 
-    background_tasks.add_task(_run_pipeline, campaign_id, campaign.niche)
+    background_tasks.add_task(_run_pipeline, campaign_id, campaign.niche, user_id)
     return {"message": "Pipeline started", "campaign_id": campaign_id}
+
+
+@router.post("/{campaign_id}/stop")
+async def stop_campaign(
+    campaign_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user_id)
+    )
+    campaign = result.scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    status_val = campaign.status.value if hasattr(campaign.status, "value") else str(campaign.status)
+    _stop_requested.add(campaign_id)
+
+    if status_val == "running":
+        # Pipeline is still active — let it detect the flag at the next checkpoint
+        return {"message": "Stop requested", "campaign_id": campaign_id}
+    else:
+        # Pipeline already finished — force status back to idle so user can re-run
+        campaign.status = CampaignStatus.idle
+        await db.commit()
+        return {"message": "Campaign reset to idle", "campaign_id": campaign_id}
+
+
+@router.post("/stop-all")
+async def stop_all_campaigns(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(
+        select(Campaign).where(Campaign.user_id == user_id)
+    )
+    all_campaigns = result.scalars().all()
+
+    for c in all_campaigns:
+        _stop_requested.add(c.id)
+        status_val = c.status.value if hasattr(c.status, "value") else str(c.status)
+        if status_val != "running":
+            c.status = CampaignStatus.idle
+
+    await db.commit()
+    return {"message": "Stop requested for all campaigns", "count": len(all_campaigns)}
