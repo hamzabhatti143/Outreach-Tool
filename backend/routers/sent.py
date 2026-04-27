@@ -4,7 +4,7 @@ from sqlalchemy import select
 from pydantic import BaseModel
 from datetime import datetime
 from db.database import get_db
-from db.models import SentLog, OutreachEmail, Lead, BlogSource, OutreachStatus, EmailReply
+from db.models import SentLog, OutreachEmail, Lead, BlogSource, OutreachStatus, EmailReply, Campaign
 from utils.auth import get_current_user_id
 from tools.mailer import send_email
 
@@ -34,7 +34,14 @@ async def list_sent(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[SentLogResponse]:
-    query = select(SentLog).order_by(SentLog.sent_at.desc())
+    # Only return sent logs for emails that belong to the current user's campaigns
+    user_campaign_ids_q = select(Campaign.id).where(Campaign.user_id == user_id).scalar_subquery()
+    query = (
+        select(SentLog)
+        .join(OutreachEmail, OutreachEmail.id == SentLog.outreach_email_id)
+        .where(OutreachEmail.campaign_id.in_(user_campaign_ids_q))
+        .order_by(SentLog.sent_at.desc())
+    )
     if status_filter:
         query = query.where(SentLog.status == status_filter)
 
@@ -115,6 +122,13 @@ async def retry_send(
     email_obj = await db.get(OutreachEmail, log.outreach_email_id)
     if not email_obj:
         raise HTTPException(status_code=404, detail="Outreach email not found")
+
+    # Verify ownership
+    camp_res = await db.execute(
+        select(Campaign).where(Campaign.id == email_obj.campaign_id, Campaign.user_id == user_id)
+    )
+    if not camp_res.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Log entry not found")
 
     email_obj.status = OutreachStatus.approved
     log.retry_count = max(0, log.retry_count - 1)

@@ -111,11 +111,14 @@ async def list_all(
     db: AsyncSession = Depends(get_db),
 ) -> list[OutreachResponse]:
     """Return outreach emails filtered by campaign and optionally by status string."""
-    query = select(OutreachEmail)
+    query = (
+        select(OutreachEmail)
+        .join(Campaign, Campaign.id == OutreachEmail.campaign_id)
+        .where(Campaign.user_id == user_id)
+    )
     if campaign_id:
         query = query.where(OutreachEmail.campaign_id == campaign_id)
     if status:
-        # Compare as raw string to avoid enum coercion issues
         query = query.where(OutreachEmail.status == status)
     result = await db.execute(query.order_by(OutreachEmail.created_at.desc()))
     return await _enrich_emails(result.scalars().all(), db)
@@ -127,7 +130,11 @@ async def list_pending(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[OutreachResponse]:
-    query = select(OutreachEmail).where(OutreachEmail.status == "pending")
+    query = (
+        select(OutreachEmail)
+        .join(Campaign, Campaign.id == OutreachEmail.campaign_id)
+        .where(Campaign.user_id == user_id, OutreachEmail.status == "pending")
+    )
     if campaign_id:
         query = query.where(OutreachEmail.campaign_id == campaign_id)
     result = await db.execute(query.order_by(OutreachEmail.created_at.desc()))
@@ -140,11 +147,27 @@ async def list_approved(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[OutreachResponse]:
-    query = select(OutreachEmail).where(OutreachEmail.status == "approved")
+    query = (
+        select(OutreachEmail)
+        .join(Campaign, Campaign.id == OutreachEmail.campaign_id)
+        .where(Campaign.user_id == user_id, OutreachEmail.status == "approved")
+    )
     if campaign_id:
         query = query.where(OutreachEmail.campaign_id == campaign_id)
     result = await db.execute(query.order_by(OutreachEmail.approved_at.desc()))
     return await _enrich_emails(result.scalars().all(), db)
+
+
+async def _get_owned_email(email_id: int, user_id: int, db: AsyncSession) -> OutreachEmail:
+    result = await db.execute(
+        select(OutreachEmail)
+        .join(Campaign, Campaign.id == OutreachEmail.campaign_id)
+        .where(OutreachEmail.id == email_id, Campaign.user_id == user_id)
+    )
+    email = result.scalar_one_or_none()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    return email
 
 
 @router.patch("/{email_id}/approve")
@@ -153,12 +176,7 @@ async def approve_email(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    result = await db.execute(
-        select(OutreachEmail).where(OutreachEmail.id == email_id)
-    )
-    email = result.scalar_one_or_none()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
+    email = await _get_owned_email(email_id, user_id, db)
     email.status = OutreachStatus.approved
     email.approved_at = datetime.utcnow()
     await db.commit()
@@ -171,12 +189,7 @@ async def reject_email(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    result = await db.execute(
-        select(OutreachEmail).where(OutreachEmail.id == email_id)
-    )
-    email = result.scalar_one_or_none()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
+    email = await _get_owned_email(email_id, user_id, db)
     email.status = OutreachStatus.rejected
     await db.commit()
     return {"id": email_id, "status": "rejected"}
@@ -189,12 +202,6 @@ async def edit_email(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> OutreachResponse:
-    result = await db.execute(
-        select(OutreachEmail).where(OutreachEmail.id == email_id)
-    )
-    email = result.scalar_one_or_none()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
     if req.subject is not None:
         email.subject = req.subject
     if req.body is not None:

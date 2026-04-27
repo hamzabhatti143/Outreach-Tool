@@ -11,6 +11,7 @@ load_dotenv()
 client = AsyncOpenAI(
     api_key=os.getenv("GEMINI_API_KEY", ""),
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    max_retries=0,  # disable built-in retry — our loop handles it with proper waits
 )
 
 # All instructions in the system prompt so they are shared across calls (prompt caching)
@@ -43,7 +44,7 @@ async def generate_outreach(
     for attempt in range(4):
         try:
             response = await client.chat.completions.create(
-                model="gemini-2.5-flash",
+                model="gemini-2.5-flash-lite",
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
@@ -60,7 +61,7 @@ async def generate_outreach(
         except RateLimitError:
             if attempt == 3:
                 raise
-            wait = 15 * (attempt + 1)
+            wait = 60  # flat 60s wait — enough for the per-minute quota to reset
             print(f"[email_writer] Rate limited — retrying in {wait}s (attempt {attempt + 1}/4)")
             await asyncio.sleep(wait)
         except (APIConnectionError, APITimeoutError) as exc:

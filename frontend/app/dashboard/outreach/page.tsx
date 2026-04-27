@@ -398,6 +398,7 @@ export default function OutreachPage() {
       <AnimatePresence>
         {error && (
           <motion.div
+            key="error"
             initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
             className="flex items-center gap-2 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700"
           >
@@ -407,6 +408,7 @@ export default function OutreachPage() {
         )}
         {generateResult && (
           <motion.div
+            key="generateResult"
             initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
             className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-sm ${
               generateResult.ok
@@ -420,6 +422,7 @@ export default function OutreachPage() {
         )}
         {successMsg && (
           <motion.div
+            key="successMsg"
             initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
             className="flex items-center gap-2 rounded-lg bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-700"
           >

@@ -5,8 +5,10 @@ from sqlalchemy import select, func
 from db.models import Lead, OutreachEmail, BlogSource, ValidityStatus, OutreachStatus
 from tools.email_writer import generate_outreach
 
-_WRITE_CONCURRENCY = 3
 _BATCH_SIZE = 10
+_SUB_BATCH_SIZE = 5   # generate this many, pause, then generate the next group
+_REQUEST_INTERVAL = 3  # seconds between individual calls
+_SUB_BATCH_GAP = 15   # seconds to wait between the two groups of 5
 
 
 async def run_writer_agent(
@@ -15,9 +17,9 @@ async def run_writer_agent(
     db: AsyncSession,
 ) -> int:
     """
-    Generates outreach emails in batches of 10.
-    If any emails are still pending or approved (not yet sent), generation is skipped —
-    the existing batch must be sent first before the next one is created.
+    Generates outreach emails one at a time with a 7-second gap between each
+    Gemini call to stay safely under the 10 RPM free-tier limit.
+    Skips generation if unsent drafts still exist — current batch must be sent first.
     Returns count of emails generated.
     """
     # If unsent drafts exist, hold off until they are sent
@@ -67,9 +69,10 @@ async def run_writer_agent(
 
     # Take only the next batch
     batch = filtered[:_BATCH_SIZE]
+    remaining = len(filtered) - len(batch)
     print(
-        f"[writer_agent] Generating batch of {len(batch)} emails "
-        f"({len(filtered) - len(batch)} leads remain for future batches)"
+        f"[writer_agent] Generating {len(batch)} emails one by one "
+        f"({_REQUEST_INTERVAL}s between calls, {remaining} leads queued for next batch)"
     )
 
     # Pre-load blog info in one query
@@ -79,44 +82,44 @@ async def run_writer_agent(
         blog_res = await db.execute(select(BlogSource).where(BlogSource.id.in_(blog_ids)))
         blogs = {b.id: b for b in blog_res.scalars().all()}
 
-    sem = asyncio.Semaphore(_WRITE_CONCURRENCY)
+    generated = 0
 
-    async def generate_for_lead(lead: Lead) -> dict[str, Any] | None:
-        blog = blogs.get(lead.source_blog_id) if lead.source_blog_id else None
-        blog_name = blog.blog_name or "the blog" if blog else "the blog"
-        blog_url = blog.url if blog else ""
+    # Split batch into sub-batches of 5 with a longer gap between groups
+    sub_batches = [batch[i:i + _SUB_BATCH_SIZE] for i in range(0, len(batch), _SUB_BATCH_SIZE)]
 
-        async with sem:
+    for sub_idx, sub_batch in enumerate(sub_batches):
+        if sub_idx > 0:
+            print(f"[writer_agent] Sub-batch {sub_idx} done — waiting {_SUB_BATCH_GAP}s before next group")
+            await asyncio.sleep(_SUB_BATCH_GAP)
+
+        for i, lead in enumerate(sub_batch):
+            if i > 0:
+                await asyncio.sleep(_REQUEST_INTERVAL)
+
+            global_idx = sub_idx * _SUB_BATCH_SIZE + i + 1
+            blog = blogs.get(lead.source_blog_id) if lead.source_blog_id else None
+            blog_name = blog.blog_name or "the blog" if blog else "the blog"
+            blog_url = blog.url if blog else ""
+
             try:
-                result = await generate_outreach(
+                email_data: dict[str, Any] = await generate_outreach(
                     blog_name=blog_name,
                     niche=niche,
                     url=blog_url,
                     campaign_id=campaign_id,
                 )
-                print(f"[writer_agent] OK lead={lead.id} ({lead.email})")
-                return result
+                db.add(OutreachEmail(
+                    lead_id=lead.id,
+                    campaign_id=campaign_id,
+                    subject=email_data["subject"],
+                    body=email_data["body"],
+                    status=OutreachStatus.pending,
+                ))
+                await db.commit()
+                generated += 1
+                print(f"[writer_agent] {global_idx}/{len(batch)} OK — lead={lead.id} ({lead.email})")
             except Exception as exc:
-                print(f"[writer_agent] FAIL lead={lead.id} ({lead.email}): {type(exc).__name__}: {exc}")
-                return None
-
-    results = await asyncio.gather(*[generate_for_lead(l) for l in batch])
-
-    generated = 0
-    for lead, email_data in zip(batch, results):
-        if not email_data:
-            continue
-        db.add(OutreachEmail(
-            lead_id=lead.id,
-            campaign_id=campaign_id,
-            subject=email_data["subject"],
-            body=email_data["body"],
-            status=OutreachStatus.pending,
-        ))
-        generated += 1
-
-    if generated:
-        await db.commit()
+                print(f"[writer_agent] {global_idx}/{len(batch)} FAIL — lead={lead.id} ({lead.email}): {type(exc).__name__}: {exc}")
 
     print(f"[writer_agent] Done: {generated}/{len(batch)} emails generated this batch")
     return generated

@@ -91,7 +91,10 @@ async def validate_leads(
 ) -> dict:
     import asyncio
 
-    result = await db.execute(select(Lead).where(Lead.id.in_(body.ids)))
+    user_camp_ids = select(Campaign.id).where(Campaign.user_id == user_id).scalar_subquery()
+    result = await db.execute(
+        select(Lead).where(Lead.id.in_(body.ids), Lead.campaign_id.in_(user_camp_ids))
+    )
     leads = result.scalars().all()
 
     async def _v(lead: Lead) -> None:
@@ -113,7 +116,10 @@ async def bulk_delete_leads(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await db.execute(delete(Lead).where(Lead.id.in_(body.ids)))
+    user_camp_ids = select(Campaign.id).where(Campaign.user_id == user_id).scalar_subquery()
+    await db.execute(
+        delete(Lead).where(Lead.id.in_(body.ids), Lead.campaign_id.in_(user_camp_ids))
+    )
     await db.commit()
 
 
