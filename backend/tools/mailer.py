@@ -15,7 +15,7 @@ from routers.gmail import _get_valid_token
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = os.getenv("BASE_URL", "https://hamzabhatti-outreach-tool-82fb335.hf.space")
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
 MAX_RETRIES = 3
 RETRY_DELAYS = [5, 15, 45]
