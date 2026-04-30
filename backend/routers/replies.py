@@ -360,13 +360,17 @@ async def edit_response(
 ) -> dict:
     ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
     ar = ar_res.scalar_one_or_none()
-    if not ar:
-        raise HTTPException(
-            status_code=404,
-            detail="No AI response for this reply. Generate one first.",
+    if ar:
+        ar.user_edited_subject = req.user_edited_subject
+        ar.user_edited_body = req.user_edited_body
+    else:
+        # Create a manual reply record (no AI suggested content)
+        ar = AIResponse(
+            reply_id=reply_id,
+            user_edited_subject=req.user_edited_subject,
+            user_edited_body=req.user_edited_body,
         )
-    ar.user_edited_subject = req.user_edited_subject
-    ar.user_edited_body = req.user_edited_body
+        db.add(ar)
     await db.commit()
     return {"reply_id": reply_id, "saved": True}
 

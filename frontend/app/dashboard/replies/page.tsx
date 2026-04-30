@@ -5,7 +5,7 @@ import {
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Loader2, RefreshCw, ChevronLeft, Sparkles, Send,
+  Loader2, RefreshCw, ChevronLeft, Send,
   Check, CheckCheck, AlertCircle, ArrowUpDown, InboxIcon,
   ChevronDown, ChevronUp, ExternalLink, Mail, MailOpen,
 } from "lucide-react";
@@ -151,12 +151,10 @@ export default function RepliesPage() {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Action states
-  const [isGenerating, setIsGenerating] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isPolling, setIsPolling] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [showRegenConfirm, setShowRegenConfirm] = useState(false);
   const [pollToast, setPollToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
   // Textarea auto-resize
@@ -223,7 +221,7 @@ export default function RepliesPage() {
   }
 
   function scheduleAutoSave(subject: string, body: string) {
-    if (!open?.ai_response) return;
+    if (!open) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
@@ -247,34 +245,17 @@ export default function RepliesPage() {
     scheduleAutoSave(draftSubject, val);
   }
 
-  async function handleGenerate(confirmed = false) {
-    if (!open) return;
-    if (!confirmed && open.ai_response) { setShowRegenConfirm(true); return; }
-    setShowRegenConfirm(false);
-    setIsGenerating(true);
-    setActionError(null);
-    try {
-      await api.post(`/replies/${open.id}/generate-response`);
-      await load();
-    } catch {
-      setActionError("Failed to generate response. Please try again.");
-    } finally {
-      setIsGenerating(false);
-    }
-  }
-
   async function handleApprove() {
     if (!open) return;
     setIsApproving(true);
     setActionError(null);
     try {
       if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
-      if (open.ai_response) {
-        await api.patch(`/replies/${open.id}/response`, {
-          user_edited_subject: draftSubject,
-          user_edited_body: draftBody,
-        });
-      }
+      // Always save draft first — upserts the reply record if it doesn't exist yet
+      await api.patch(`/replies/${open.id}/response`, {
+        user_edited_subject: draftSubject,
+        user_edited_body: draftBody,
+      });
       await api.post(`/replies/${open.id}/response/approve`);
       await load();
     } catch {
@@ -328,11 +309,6 @@ export default function RepliesPage() {
       const rb = PRIORITY_RANK[b.priority ?? ""] ?? 0;
       return sortOrder === "high-to-low" ? rb - ra : ra - rb;
     });
-
-  const isEdited =
-    open?.ai_response != null &&
-    (draftSubject !== (open.ai_response.suggested_subject ?? "") ||
-      draftBody !== (open.ai_response.suggested_body ?? ""));
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -536,19 +512,14 @@ export default function RepliesPage() {
                     accent="gray"
                   />
 
-                  {/* 3. AI Response Editor */}
+                  {/* 3. Reply Editor */}
                   <div className="rounded-lg border border-blue-200 bg-blue-50/30 overflow-hidden">
                     <div className="flex items-center justify-between px-4 py-3 border-b border-blue-100 bg-blue-50">
                       <div className="flex items-center gap-2">
-                        <Sparkles className="h-4 w-4 text-blue-600" />
+                        <Mail className="h-4 w-4 text-blue-600" />
                         <span className="text-xs font-semibold text-blue-800 uppercase tracking-wide">
                           Your Reply
                         </span>
-                        {open.ai_response && (
-                          <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${isEdited ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
-                            {isEdited ? "Edited" : "AI draft"}
-                          </span>
-                        )}
                         <AnimatePresence>
                           {savedIndicator && (
                             <motion.span
@@ -571,95 +542,64 @@ export default function RepliesPage() {
                     </div>
 
                     <div className="px-4 py-4">
-                      {/* Regenerate confirm */}
-                      {showRegenConfirm && (
-                        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm">
-                          <p className="font-medium text-amber-800 mb-2">
-                            Regenerate will overwrite your edits. Continue?
-                          </p>
-                          <div className="flex gap-2">
-                            <Button size="sm" onClick={() => handleGenerate(true)} loading={isGenerating}>
-                              Yes, regenerate
-                            </Button>
-                            <Button size="sm" variant="ghost" onClick={() => setShowRegenConfirm(false)}>
-                              Cancel
-                            </Button>
-                          </div>
+
+                      <div className="space-y-3">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-gray-600">Subject</label>
+                          <Input
+                            value={draftSubject}
+                            onChange={(e) => handleSubjectChange(e.target.value)}
+                            disabled={open.ai_response?.is_sent ?? false}
+                            placeholder="Re: ..."
+                            className="ring-2 ring-blue-400 focus:ring-blue-500 disabled:opacity-60"
+                          />
                         </div>
-                      )}
 
-                      {open.ai_response === null ? (
-                        <div className="flex flex-col items-center gap-3 py-8 text-center">
-                          <Sparkles className="h-8 w-8 text-blue-400 opacity-60" />
-                          <p className="text-sm text-gray-500">
-                            Generate an AI-written reply to this email — then edit it before sending.
-                          </p>
-                          <Button onClick={() => handleGenerate(false)} loading={isGenerating} className="gap-2">
-                            <Sparkles className="h-4 w-4" /> Generate AI Reply
-                          </Button>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-gray-600">Body — write your reply</label>
+                          <Textarea
+                            ref={bodyRef}
+                            value={draftBody}
+                            onChange={(e) => handleBodyChange(e.target.value)}
+                            rows={8}
+                            disabled={open.ai_response?.is_sent ?? false}
+                            placeholder="Type your reply here…"
+                            className="ring-2 ring-blue-400 focus:ring-blue-500 resize-none overflow-hidden disabled:opacity-60"
+                          />
                         </div>
-                      ) : (
-                        <div className="space-y-3">
-                          <div className="space-y-1.5">
-                            <label className="text-xs font-medium text-gray-600">Subject</label>
-                            <Input
-                              value={draftSubject}
-                              onChange={(e) => handleSubjectChange(e.target.value)}
-                              disabled={open.ai_response.is_sent}
-                              className="ring-2 ring-blue-400 focus:ring-blue-500 disabled:opacity-60"
-                            />
-                          </div>
 
-                          <div className="space-y-1.5">
-                            <label className="text-xs font-medium text-gray-600">Body — edit freely before sending</label>
-                            <Textarea
-                              ref={bodyRef}
-                              value={draftBody}
-                              onChange={(e) => handleBodyChange(e.target.value)}
-                              rows={8}
-                              disabled={open.ai_response.is_sent}
-                              className="ring-2 ring-blue-400 focus:ring-blue-500 resize-none overflow-hidden disabled:opacity-60"
-                            />
-                          </div>
-
-                          <div className="flex items-center gap-2 pt-1 flex-wrap">
-                            {!showRegenConfirm && !open.ai_response.is_sent && (
-                              <Button size="sm" variant="outline" onClick={() => handleGenerate(false)} loading={isGenerating}>
-                                <Sparkles className="h-3 w-3 mr-1" /> Regenerate
-                              </Button>
-                            )}
-
-                            {!open.ai_response.is_sent && (
-                              <Button
-                                size="sm"
-                                variant={open.ai_response.is_approved ? "secondary" : "default"}
-                                onClick={handleApprove}
-                                loading={isApproving}
-                              >
-                                <CheckCheck className="h-3 w-3 mr-1" />
-                                {open.ai_response.is_approved ? "Approved" : "Approve"}
-                              </Button>
-                            )}
-
+                        <div className="flex items-center gap-2 pt-1 flex-wrap">
+                          {!(open.ai_response?.is_sent) && (
                             <Button
                               size="sm"
-                              onClick={handleSend}
-                              loading={isSending}
-                              disabled={!open.ai_response.is_approved || open.ai_response.is_sent}
-                              className={open.ai_response.is_sent ? "opacity-60" : ""}
+                              variant={open.ai_response?.is_approved ? "secondary" : "default"}
+                              onClick={handleApprove}
+                              loading={isApproving}
+                              disabled={!draftBody.trim()}
                             >
-                              <Send className="h-3 w-3 mr-1" />
-                              {open.ai_response.is_sent ? "Sent" : "Send Reply"}
+                              <CheckCheck className="h-3 w-3 mr-1" />
+                              {open.ai_response?.is_approved ? "Approved" : "Approve"}
                             </Button>
-                          </div>
-
-                          {open.ai_response.is_sent && (
-                            <p className="text-xs text-indigo-600 font-medium flex items-center gap-1">
-                              <CheckCheck className="h-3.5 w-3.5" /> Reply sent via Gmail
-                            </p>
                           )}
+
+                          <Button
+                            size="sm"
+                            onClick={handleSend}
+                            loading={isSending}
+                            disabled={!(open.ai_response?.is_approved) || (open.ai_response?.is_sent ?? false)}
+                            className={open.ai_response?.is_sent ? "opacity-60" : ""}
+                          >
+                            <Send className="h-3 w-3 mr-1" />
+                            {open.ai_response?.is_sent ? "Sent" : "Send Reply"}
+                          </Button>
                         </div>
-                      )}
+
+                        {open.ai_response?.is_sent && (
+                          <p className="text-xs text-indigo-600 font-medium flex items-center gap-1">
+                            <CheckCheck className="h-3.5 w-3.5" /> Reply sent via Gmail
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </div>
 

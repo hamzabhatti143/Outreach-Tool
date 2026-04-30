@@ -202,6 +202,7 @@ async def edit_email(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> OutreachResponse:
+    email = await _get_owned_email(email_id, user_id, db)
     if req.subject is not None:
         email.subject = req.subject
     if req.body is not None:
