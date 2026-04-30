@@ -214,7 +214,6 @@ export default function RepliesPage() {
   function openReply(reply: ReplyItem) {
     setOpen(reply);
     setActionError(null);
-    setShowRegenConfirm(false);
     const ai = reply.ai_response;
     setDraftSubject(ai?.user_edited_subject ?? ai?.suggested_subject ?? "");
     setDraftBody(ai?.user_edited_body ?? ai?.suggested_body ?? "");
