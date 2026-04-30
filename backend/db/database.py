@@ -34,8 +34,8 @@ engine = create_async_engine(
     connect_args={
         "ssl": "require",
         "prepared_statement_cache_size": 0,
-        "timeout": 30,               # connection timeout in seconds
-        "command_timeout": 60,       # query timeout in seconds
+        "timeout": 30,
+        "command_timeout": 60,
         "server_settings": {
             "plan_cache_mode": "force_generic_plan",
         },
@@ -50,7 +50,6 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
-# Errors that indicate a transient connection problem worth retrying
 _TRANSIENT_MSGS = ("ssl", "tls", "eof", "connection", "getaddrinfo", "start_tls", "timeout")
 
 
@@ -70,7 +69,6 @@ class _RetrySession:
         for attempt in range(self._max):
             try:
                 self._session = AsyncSessionLocal()
-                # Force a real connection immediately so we catch SSL errors here
                 await self._session.connection()
                 return self._session
             except Exception as exc:
@@ -78,7 +76,7 @@ class _RetrySession:
                     await self._session.close()
                     self._session = None
                 if attempt < self._max - 1 and _is_transient(exc):
-                    wait = 2 ** attempt  # 1s, 2s
+                    wait = 2 ** attempt
                     logger.warning(
                         "[db] Transient connection error (attempt %d/%d), retrying in %ds: %s",
                         attempt + 1, self._max, wait, exc,
@@ -114,6 +112,28 @@ _GMAIL_MIGRATIONS = [
     "ALTER TABLE sent_log ADD COLUMN IF NOT EXISTS gmail_thread_id VARCHAR(255)",
 ]
 
+_NEW_MIGRATIONS = [
+    # Campaign pagination state
+    "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS last_search_page INTEGER DEFAULT 0",
+    "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS last_search_query_index INTEGER DEFAULT 0",
+    "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS total_blogs_fetched INTEGER DEFAULT 0",
+    # Search query page tracking
+    "ALTER TABLE search_queries ADD COLUMN IF NOT EXISTS page_offset INTEGER DEFAULT 0",
+    # Outreach email thread continuity
+    "ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS message_id VARCHAR(500)",
+    # AI response thread reference chain
+    "ALTER TABLE ai_responses ADD COLUMN IF NOT EXISTS thread_references TEXT",
+    # Unique indexes for deduplication
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_leads_campaign_email ON leads (campaign_id, email)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_blog_sources_campaign_url ON blog_sources (campaign_id, url)",
+    # App-wide key/value settings table
+    """CREATE TABLE IF NOT EXISTS app_settings (
+        key VARCHAR(255) PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+    )""",
+]
+
 
 async def init_db() -> None:
     for attempt in range(3):
@@ -122,7 +142,7 @@ async def init_db() -> None:
                 from db.models import Base
                 await conn.run_sync(Base.metadata.create_all)
                 from sqlalchemy import text
-                for stmt in _GMAIL_MIGRATIONS:
+                for stmt in _GMAIL_MIGRATIONS + _NEW_MIGRATIONS:
                     await conn.execute(text(stmt))
             return
         except Exception as exc:

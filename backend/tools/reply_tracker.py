@@ -53,15 +53,17 @@ async def poll_inbox(user_id: int) -> dict:
     Poll Gmail threads for replies to sent outreach emails.
 
     Strategy:
-      - Find all SentLog rows (for this user) that have a gmail_thread_id
-        but no EmailReply yet.
+      - Find all SentLog rows (for this user) that have a gmail_thread_id.
       - Call Gmail Threads API for each thread.
       - If messages > 1, the thread has replies — save them as EmailReply rows
         and run sentiment analysis.
+      - Uses INSERT … ON CONFLICT DO NOTHING via message_id UNIQUE constraint
+        to prevent duplicate replies even if this is called multiple times.
 
     Returns {"new": int, "errors": list[str]}
     """
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     from db.database import retry_session
     from db.models import (
         EmailReply, OutreachEmail, Lead, SentLog, SentStatus,
@@ -73,18 +75,15 @@ async def poll_inbox(user_id: int) -> dict:
     errors: list[str] = []
 
     async with retry_session() as db:
-        # Load the user
         user = await db.get(User, user_id)
         if not user or not user.gmail_refresh_token:
             return {"new": 0, "errors": ["Gmail not connected"]}
 
-        # Get a valid access token
         try:
             access_token = await _get_valid_token(user, db)
         except Exception as exc:
             return {"new": 0, "errors": [f"Token error: {exc}"]}
 
-        # Find SentLog rows for this user's campaigns that have a thread ID
         rows = await db.execute(
             select(SentLog, OutreachEmail, Lead)
             .join(OutreachEmail, SentLog.outreach_email_id == OutreachEmail.id)
@@ -111,7 +110,6 @@ async def poll_inbox(user_id: int) -> dict:
                     )
 
                     if r.status_code == 401:
-                        # Token expired mid-batch — refresh and retry once
                         access_token = await _get_valid_token(user, db)
                         r = await client.get(
                             f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{log.gmail_thread_id}",
@@ -125,13 +123,12 @@ async def poll_inbox(user_id: int) -> dict:
 
                     messages = r.json().get("messages", [])
                     if len(messages) <= 1:
-                        continue  # no replies yet
+                        continue
 
-                    # messages[0] is our outreach; messages[1:] are replies
                     for reply_msg in messages[1:]:
                         msg_id = reply_msg.get("id", "")
 
-                        # Deduplicate
+                        # Dedup check — fast path before attempting insert
                         existing = await db.execute(
                             select(EmailReply).where(EmailReply.message_id == msg_id)
                         )
@@ -169,7 +166,13 @@ async def poll_inbox(user_id: int) -> dict:
                             received_at=received_at,
                         )
                         db.add(reply)
-                        await db.flush()
+
+                        try:
+                            await db.flush()
+                        except IntegrityError:
+                            # UNIQUE(message_id) violation — already inserted by a concurrent poll
+                            await db.rollback()
+                            continue
 
                         sentiment_data = analyze_sentiment(body_text)
                         reply.sentiment = sentiment_data["sentiment"]

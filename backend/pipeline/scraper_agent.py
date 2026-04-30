@@ -2,6 +2,7 @@ import asyncio
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from db.models import Lead, ValidityStatus
 from tools.scraper import scrape_emails
 
@@ -16,10 +17,10 @@ async def run_scraper_agent(
 ) -> int:
     """
     Scrapes all blog sources concurrently.
-    Deletes any duplicate leads already in DB, then saves only unique new ones.
+    Uses INSERT ... ON CONFLICT DO NOTHING to silently skip duplicate emails.
     Returns count of new emails saved.
     """
-    # First: delete any duplicate leads left over from previous runs
+    # Remove duplicate leads from previous runs
     await db.execute(
         delete(Lead).where(Lead.campaign_id == campaign_id, Lead.is_duplicate == True)
     )
@@ -40,14 +41,13 @@ async def run_scraper_agent(
                 print(f"[scraper_agent] Error scraping {url}: {e}")
                 return []
 
-    # Scrape all sources concurrently
     nested = await asyncio.gather(*[scrape_source(s) for s in blog_sources])
     all_results: list[tuple[str, int]] = [pair for batch in nested for pair in batch]
 
     if not all_results:
         return 0
 
-    # Load existing emails for duplicate check in memory
+    # Count existing leads for the cap check
     existing_result = await db.execute(
         select(Lead.email).where(Lead.campaign_id == campaign_id)
     )
@@ -67,15 +67,22 @@ async def run_scraper_agent(
         seen_in_batch.add(email)
         existing_emails.add(email)
 
-        db.add(Lead(
+        # INSERT ... ON CONFLICT DO NOTHING handles race conditions and retries gracefully
+        stmt = pg_insert(Lead).values(
             campaign_id=campaign_id,
             email=email,
             source_blog_id=source_id or None,
-            validity_status=ValidityStatus.unverified,
+            validity_status=ValidityStatus.unverified.value,
             is_duplicate=False,
-        ))
-        new_count += 1
-        slots_left -= 1
+        ).on_conflict_do_nothing(
+            index_elements=["campaign_id", "email"],
+        )
+        result = await db.execute(stmt)
+
+        # Only count if the row was actually inserted (not a conflict skip)
+        if result.rowcount > 0:
+            new_count += 1
+            slots_left -= 1
 
     await db.commit()
     return new_count

@@ -34,7 +34,9 @@ export default function LeadsPage() {
     setSelected(new Set());
     try {
       const { data } = await api.get<Lead[]>(`/campaigns/${selectedId}/leads`);
-      setLeads(data);
+      // Client-side safety net: deduplicate by email address, keeping the first occurrence
+      const unique = Array.from(new Map(data.map((l) => [l.email.toLowerCase(), l])).values());
+      setLeads(unique);
     } finally {
       setLoading(false);
     }

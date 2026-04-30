@@ -225,11 +225,19 @@ async def campaign_stats(
         )
     )
 
+    # Reload campaign for pagination stats
+    camp_res2 = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id)
+    )
+    camp = camp_res2.scalar_one_or_none()
+
     return {
         "sources": sources_res.scalar() or 0,
         "leads": leads_res.scalar() or 0,
         "pending_outreach": pending_res.scalar() or 0,
         "approved_outreach": approved_res.scalar() or 0,
+        "total_blogs_fetched": (camp.total_blogs_fetched or 0) if camp else 0,
+        "last_search_page": (camp.last_search_page or 0) if camp else 0,
     }
 
 

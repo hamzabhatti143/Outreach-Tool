@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Loader2, Check, X, Edit2, Save, CheckCheck,
   Mail, ChevronLeft, RefreshCw, AlertCircle,
-  Play, Clock, CheckCircle, Zap, Sparkles,
+  Play, Clock, CheckCircle, Zap, Sparkles, Send,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +35,14 @@ interface CampaignStats {
   approved_outreach: number;
 }
 
+interface SendProgress {
+  total: number;
+  sent: number;
+  failed: number;
+  failed_ids: number[];
+  in_progress: boolean;
+}
+
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
   const m = Math.floor(diff / 60000);
@@ -60,6 +68,13 @@ export default function OutreachPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Approve-all / Send-all state
+  const [approvingAll, setApprovingAll] = useState(false);
+  const [sendingAll, setSendingAll] = useState(false);
+  const [sendProgress, setSendProgress] = useState<SendProgress | null>(null);
+  const [showSendConfirm, setShowSendConfirm] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [editing, setEditing] = useState(false);
   const [editSubject, setEditSubject] = useState("");
@@ -98,28 +113,37 @@ export default function OutreachPage() {
     } finally {
       setLoading(false);
     }
-    // stats load in background — don't block
     try {
       const { data: s } = await api.get<CampaignStats>(`/campaigns/${cid}/stats`);
       setStats(s);
     } catch { /* non-critical */ }
   }, [statusFilter]);
 
-  // Load whenever campaign selection is ready
   useEffect(() => {
-    if (campaignsLoading) return;         // wait for context
-    if (!selectedId) {
-      setEmails([]);
-      setStats(null);
-      setLoading(false);
-      return;
-    }
+    if (campaignsLoading) return;
+    if (!selectedId) { setEmails([]); setStats(null); setLoading(false); return; }
     load(selectedId);
   }, [selectedId, campaignsLoading, load]);
 
+  // Stop progress polling when send job completes
+  useEffect(() => {
+    if (sendProgress && !sendProgress.in_progress && pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+      setSendingAll(false);
+      showSuccess(
+        `Send complete — Sent: ${sendProgress.sent} | Failed: ${sendProgress.failed}`
+      );
+      if (selectedId) load(selectedId);
+    }
+  }, [sendProgress, selectedId, load]);
+
+  // Cleanup interval on unmount
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
   function showSuccess(msg: string) {
     setSuccessMsg(msg);
-    setTimeout(() => setSuccessMsg(null), 3000);
+    setTimeout(() => setSuccessMsg(null), 4000);
   }
 
   async function handleGenerate() {
@@ -133,7 +157,7 @@ export default function OutreachPage() {
       );
       if (data.generated === 0) {
         setGenerateResult({
-          msg: `No new drafts created — ${data.total_leads} lead${data.total_leads !== 1 ? "s" : ""} found but all already have emails (or Gemini failed — check backend logs).`,
+          msg: `No new drafts — ${data.total_leads} lead${data.total_leads !== 1 ? "s" : ""} found but all already have emails.`,
           ok: false,
         });
       } else {
@@ -145,6 +169,48 @@ export default function OutreachPage() {
       setError(msg || "Failed to generate drafts.");
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function handleApproveAll() {
+    if (!selectedId) return;
+    setApprovingAll(true);
+    setError(null);
+    try {
+      const { data } = await api.post<{ approved_count: number }>("/outreach/approve-all", {
+        campaign_id: selectedId,
+      });
+      showSuccess(`${data.approved_count} email${data.approved_count !== 1 ? "s" : ""} approved`);
+      await load(selectedId);
+    } catch {
+      setError("Failed to approve all emails.");
+    } finally {
+      setApprovingAll(false);
+    }
+  }
+
+  async function handleSendAll() {
+    if (!selectedId) return;
+    setShowSendConfirm(false);
+    setSendingAll(true);
+    setSendProgress(null);
+    setError(null);
+
+    try {
+      await api.post("/outreach/send-all-approved", { campaign_id: selectedId });
+
+      // Start polling progress every 2 seconds
+      pollRef.current = setInterval(async () => {
+        try {
+          const { data } = await api.get<SendProgress>("/outreach/send-progress");
+          setSendProgress(data);
+        } catch { /* ignore */ }
+      }, 2000);
+
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg || "Failed to start sending.");
+      setSendingAll(false);
     }
   }
 
@@ -234,7 +300,9 @@ export default function OutreachPage() {
     return <Badge variant="secondary">Pending</Badge>;
   };
 
-  // ── Empty state inside list ─────────────────────────────────────────────────
+  const pendingCount = emails.filter((e) => e.status === "pending").length;
+  const approvedCount = stats?.approved_outreach ?? 0;
+
   function ListEmpty() {
     if (!selectedCampaign) {
       return (
@@ -250,7 +318,8 @@ export default function OutreachPage() {
           <Play className="h-10 w-10 mb-3 text-gray-300" />
           <p className="text-sm font-semibold text-gray-700">Campaign hasn&apos;t run yet</p>
           <p className="text-xs mt-1 text-gray-400 max-w-xs">
-            Go to <span className="text-indigo-600 font-medium">Campaigns</span> and click <span className="font-medium">Run Pipeline</span>.
+            Go to <span className="text-indigo-600 font-medium">Campaigns</span> and click{" "}
+            <span className="font-medium">Run Pipeline</span>.
           </p>
         </div>
       );
@@ -273,7 +342,6 @@ export default function OutreachPage() {
         </div>
       );
     }
-    // completed — no drafts
     if (stats && stats.leads === 0) {
       return (
         <div className="flex flex-col items-center justify-center h-full py-20 text-center px-6">
@@ -301,15 +369,14 @@ export default function OutreachPage() {
         </div>
       );
     }
-    // leads exist but no outreach → writer step probably failed
     return (
       <div className="flex flex-col items-center justify-center h-full py-20 text-center px-6">
         <Sparkles className="h-10 w-10 mb-3 text-indigo-300" />
         <p className="text-sm font-semibold text-gray-700">No drafts yet</p>
         <p className="text-xs mt-1 text-gray-400 max-w-xs mb-4">
           {stats && stats.leads > 0
-            ? `${stats.leads} lead${stats.leads !== 1 ? "s" : ""} found — click Generate Drafts to write outreach emails.`
-            : "Run Generate Drafts to create AI outreach emails for this campaign."}
+            ? `${stats.leads} lead${stats.leads !== 1 ? "s" : ""} found — click Generate Drafts.`
+            : "Run Generate Drafts to create outreach emails for this campaign."}
         </p>
         <Button size="sm" onClick={handleGenerate} loading={generating}>
           <Sparkles className="h-3.5 w-3.5 mr-1" /> Generate Drafts
@@ -318,7 +385,6 @@ export default function OutreachPage() {
     );
   }
 
-  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-3">
 
@@ -327,22 +393,23 @@ export default function OutreachPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Outreach</h1>
           <p className="text-gray-500 text-sm mt-0.5">
-            Review and approve AI-generated draft emails before sending.
+            Review and approve draft emails before sending.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Campaign status pill */}
           {selectedCampaign && (
             <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full ${
-              selectedCampaign.status === "completed" ? "bg-green-100 text-green-700" :
-              selectedCampaign.status === "running"   ? "bg-indigo-100 text-indigo-700" :
-              selectedCampaign.status === "error"     ? "bg-red-100 text-red-600" :
-                                                        "bg-gray-100 text-gray-500"
+              selectedCampaign.status === "completed"    ? "bg-green-100 text-green-700" :
+              selectedCampaign.status === "running"      ? "bg-indigo-100 text-indigo-700" :
+              selectedCampaign.status === "quota_paused" ? "bg-amber-100 text-amber-700" :
+              selectedCampaign.status === "error"        ? "bg-red-100 text-red-600" :
+                                                           "bg-gray-100 text-gray-500"
             }`}>
-              {selectedCampaign.status === "running"   && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
-              {selectedCampaign.status === "completed" && <CheckCircle className="h-2.5 w-2.5" />}
-              {selectedCampaign.status === "error"     && <AlertCircle className="h-2.5 w-2.5" />}
-              {selectedCampaign.status === "idle"      && <Clock className="h-2.5 w-2.5" />}
+              {selectedCampaign.status === "running"      && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+              {selectedCampaign.status === "completed"    && <CheckCircle className="h-2.5 w-2.5" />}
+              {selectedCampaign.status === "error"        && <AlertCircle className="h-2.5 w-2.5" />}
+              {selectedCampaign.status === "idle"         && <Clock className="h-2.5 w-2.5" />}
+              {selectedCampaign.status === "quota_paused" && <Clock className="h-2.5 w-2.5" />}
               {selectedCampaign.status}
             </span>
           )}
@@ -371,7 +438,7 @@ export default function OutreachPage() {
             onClick={handleGenerate}
             loading={generating}
             disabled={!selectedId || generating}
-            title="Generate AI draft emails for leads that don't have one yet"
+            title="Generate draft emails for leads that don't have one yet"
           >
             <Sparkles className="h-3.5 w-3.5 mr-1" /> Generate Drafts
           </Button>
@@ -385,10 +452,79 @@ export default function OutreachPage() {
         </div>
       </div>
 
+      {/* Sticky action bar — shown when there are pending or approved emails */}
+      {selectedId && (pendingCount > 0 || approvedCount > 0) && (
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-2.5 shadow-sm flex-wrap">
+          <span className="text-sm text-indigo-800">
+            {pendingCount > 0 && (
+              <span><strong>{pendingCount}</strong> pending</span>
+            )}
+            {pendingCount > 0 && approvedCount > 0 && <span className="mx-2 text-indigo-300">·</span>}
+            {approvedCount > 0 && (
+              <span><strong>{approvedCount}</strong> approved &amp; ready to send</span>
+            )}
+          </span>
+
+          <div className="flex items-center gap-2">
+            {pendingCount > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleApproveAll}
+                loading={approvingAll}
+                disabled={approvingAll}
+                className="border-indigo-300 text-indigo-700 hover:bg-indigo-100"
+              >
+                <CheckCheck className="h-3.5 w-3.5 mr-1" /> Approve All
+              </Button>
+            )}
+            {approvedCount > 0 && (
+              <>
+                {sendingAll && sendProgress ? (
+                  <span className="text-sm text-indigo-700 font-medium">
+                    Sending… {sendProgress.sent}/{sendProgress.total}
+                    {sendProgress.failed > 0 && (
+                      <span className="text-red-600 ml-1">({sendProgress.failed} failed)</span>
+                    )}
+                  </span>
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={() => setShowSendConfirm(true)}
+                    disabled={sendingAll}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                  >
+                    <Send className="h-3.5 w-3.5 mr-1" /> Send All Approved
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Send confirmation dialog */}
+      {showSendConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full mx-4">
+            <h3 className="text-base font-semibold text-gray-900 mb-2">Send {approvedCount} approved emails?</h3>
+            <p className="text-sm text-gray-500 mb-5">
+              This will send all approved emails with a 2-second delay between each. This action cannot be undone.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <Button variant="ghost" onClick={() => setShowSendConfirm(false)}>Cancel</Button>
+              <Button onClick={handleSendAll}>
+                <Send className="h-4 w-4 mr-1" /> Send Now
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stats strip */}
       {stats && (emails.length > 0 || stats.approved_outreach > 0) && (
         <div className="flex items-center gap-4 text-sm text-gray-500 px-1">
-          {emails.length > 0 && <span><span className="font-semibold text-gray-900">{emails.length}</span> pending</span>}
+          {emails.length > 0 && <span><span className="font-semibold text-gray-900">{emails.length}</span> shown</span>}
           {stats.approved_outreach > 0 && <span><span className="font-semibold text-gray-900">{stats.approved_outreach}</span> approved</span>}
           {stats.leads > 0 && <span><span className="font-semibold text-gray-900">{stats.leads}</span> leads total</span>}
         </div>
@@ -432,14 +568,13 @@ export default function OutreachPage() {
       </AnimatePresence>
 
       {/* Main split panel */}
-      <div className="flex h-[calc(100vh-230px)] bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+      <div className="flex h-[calc(100vh-280px)] bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
 
         {/* LEFT: list */}
         <div className={`flex flex-col border-r border-gray-200 transition-all duration-200 ${open ? "w-80 shrink-0" : "flex-1"}`}>
 
           {/* Toolbar */}
           <div className="flex flex-col border-b border-gray-100">
-            {/* Status tabs */}
             <div className="flex items-center gap-1 px-3 pt-2 pb-0">
               {(["all", "pending", "approved", "rejected", "sent"] as const).map((s) => (
                 <button
@@ -459,7 +594,6 @@ export default function OutreachPage() {
                 </button>
               ))}
             </div>
-            {/* Checkbox + count row */}
             <div className="flex items-center gap-2 px-4 py-2">
               <input
                 type="checkbox"
@@ -531,7 +665,6 @@ export default function OutreachPage() {
               exit={{ opacity: 0, x: 20 }}
               transition={{ duration: 0.18 }}
             >
-              {/* Header */}
               <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100 shrink-0">
                 <button onClick={() => setOpen(null)} className="text-gray-400 hover:text-gray-700 lg:hidden">
                   <ChevronLeft className="h-5 w-5" />
@@ -550,7 +683,6 @@ export default function OutreachPage() {
                 {statusBadge(open.status)}
               </div>
 
-              {/* Meta + actions */}
               <div className="flex items-center justify-between px-6 py-3 border-b border-gray-100 bg-gray-50 shrink-0">
                 <div>
                   <p className="text-sm text-gray-700">
@@ -589,7 +721,6 @@ export default function OutreachPage() {
                 </div>
               </div>
 
-              {/* Body */}
               <div className="flex-1 overflow-y-auto px-6 py-6">
                 {editing ? (
                   <Textarea
@@ -606,7 +737,6 @@ export default function OutreachPage() {
                 )}
               </div>
 
-              {/* Bottom approve bar */}
               {open.status === "pending" && !editing && (
                 <div className="shrink-0 border-t border-gray-100 bg-gray-50 px-6 py-3 flex gap-3">
                   <Button onClick={() => handleApprove(open.id)} loading={actionLoading === "approve"} className="flex-1">

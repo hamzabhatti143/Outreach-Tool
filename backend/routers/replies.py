@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 import base64
 import logging
 from email.mime.multipart import MIMEMultipart
@@ -189,7 +190,6 @@ async def _generate_ai_reply(reply: EmailReply, outreach: OutreachEmail | None) 
         temperature=0.7,
     )
     raw = resp.choices[0].message.content or "{}"
-    # Strip markdown fences if present
     import re as _re
     fenced = _re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
     if fenced:
@@ -200,12 +200,12 @@ async def _generate_ai_reply(reply: EmailReply, outreach: OutreachEmail | None) 
 
 
 async def _send_reply_via_gmail(reply_id: int, to: str, subject: str, body: str) -> None:
-    """Background task: load user Gmail token, send reply via Gmail API, mark is_sent."""
+    """Background task: load user Gmail token, send reply via Gmail API with threading headers."""
     async with AsyncSessionLocal() as db:
-        # Walk reply → outreach → campaign → user
         reply = await db.get(EmailReply, reply_id)
         if not reply:
             return
+
         oe = await db.get(OutreachEmail, reply.outreach_email_id)
         camp = await db.get(Campaign, oe.campaign_id) if oe else None
         user = await db.get(User, camp.user_id) if camp else None
@@ -214,13 +214,48 @@ async def _send_reply_via_gmail(reply_id: int, to: str, subject: str, body: str)
             logger.error("Cannot send reply %s — Gmail not connected", reply_id)
             return
 
+        # Load the AI response to get existing thread references
+        ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
+        ar_obj = ar_res.scalar_one_or_none()
+
+        # Gather threading headers
+        their_message_id = reply.message_id  # their reply's Message-ID
+        original_message_id = oe.message_id if oe else None  # our original outreach Message-ID
+
+        # Build the References chain: original → their reply → (previous our replies from thread_references)
+        existing_refs = ar_obj.thread_references if ar_obj else None
+        ref_parts: list[str] = []
+        if original_message_id:
+            ref_parts.append(original_message_id)
+        if existing_refs:
+            for mid in existing_refs.split():
+                if mid not in ref_parts:
+                    ref_parts.append(mid)
+        if their_message_id and their_message_id not in ref_parts:
+            ref_parts.append(their_message_id)
+        references_header = " ".join(ref_parts) if ref_parts else None
+
+        # Normalise subject to use their exact subject (for thread grouping)
+        final_subject = reply.subject or subject
+        if final_subject and not final_subject.lower().startswith("re:"):
+            final_subject = f"Re: {final_subject}"
+
+        # Generate our reply's Message-ID
+        our_message_id = f"<{uuid.uuid4()}@outreach.tool>"
+
         try:
             access_token = await _get_valid_token(user, db)
 
             msg = MIMEMultipart("alternative")
             msg["From"] = user.email
             msg["To"] = to
-            msg["Subject"] = subject
+            msg["Subject"] = final_subject
+            msg["Message-ID"] = our_message_id
+            if their_message_id:
+                msg["In-Reply-To"] = their_message_id
+            if references_header:
+                msg["References"] = references_header
+
             msg.attach(MIMEText(body, "plain"))
 
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
@@ -239,10 +274,12 @@ async def _send_reply_via_gmail(reply_id: int, to: str, subject: str, body: str)
             logger.error("Reply send failed for reply_id=%s: %s", reply_id, exc)
             return
 
-        ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
-        ar_obj = ar_res.scalar_one_or_none()
+        # Mark sent and update thread references chain
         if ar_obj:
             ar_obj.is_sent = True
+            # Append our new Message-ID to the references chain
+            new_refs = (references_header + " " + our_message_id).strip() if references_header else our_message_id
+            ar_obj.thread_references = new_refs
             await db.commit()
 
 
@@ -364,7 +401,6 @@ async def edit_response(
         ar.user_edited_subject = req.user_edited_subject
         ar.user_edited_body = req.user_edited_body
     else:
-        # Create a manual reply record (no AI suggested content)
         ar = AIResponse(
             reply_id=reply_id,
             user_edited_subject=req.user_edited_subject,

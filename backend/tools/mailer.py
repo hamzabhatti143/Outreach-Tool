@@ -1,4 +1,5 @@
 import os
+import uuid
 import base64
 import asyncio
 import logging
@@ -33,7 +34,21 @@ def _build_email_html(body: str, tracking_id: int) -> str:
 </html>"""
 
 
-async def _gmail_send(user: User, db: AsyncSession, to: str, subject: str, plain: str, html: str) -> str:
+def generate_message_id() -> str:
+    return f"<{uuid.uuid4()}@outreach.tool>"
+
+
+async def _gmail_send(
+    user: User,
+    db: AsyncSession,
+    to: str,
+    subject: str,
+    plain: str,
+    html: str,
+    message_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+) -> str:
     """Send via Gmail API. Returns threadId."""
     access_token = await _get_valid_token(user, db)
 
@@ -41,6 +56,14 @@ async def _gmail_send(user: User, db: AsyncSession, to: str, subject: str, plain
     msg["From"] = user.email
     msg["To"] = to
     msg["Subject"] = subject
+
+    if message_id:
+        msg["Message-ID"] = message_id
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
+
     msg.attach(MIMEText(plain, "plain"))
     msg.attach(MIMEText(html, "html"))
 
@@ -63,6 +86,7 @@ async def send_email(outreach_email_id: int, db: AsyncSession) -> dict[str, Any]
     """
     Send an approved outreach email via Gmail API.
     Walks outreach → campaign → user to resolve the sender's Gmail credentials.
+    Generates and stores a Message-ID for email thread continuity.
     """
     result = await db.execute(
         select(OutreachEmail).where(OutreachEmail.id == outreach_email_id)
@@ -96,6 +120,10 @@ async def send_email(outreach_email_id: int, db: AsyncSession) -> dict[str, Any]
     if retry_count >= MAX_RETRIES:
         return {"status": "failed", "error": f"Max retries ({MAX_RETRIES}) exceeded"}
 
+    # Generate a stable Message-ID for this outreach email
+    if not outreach.message_id:
+        outreach.message_id = generate_message_id()
+
     html_body = _build_email_html(outreach.body, outreach_email_id)
     last_error: str | None = None
 
@@ -107,6 +135,7 @@ async def send_email(outreach_email_id: int, db: AsyncSession) -> dict[str, Any]
                 subject=outreach.subject,
                 plain=outreach.body,
                 html=html_body,
+                message_id=outreach.message_id,
             )
 
             outreach.status = OutreachStatus.sent
