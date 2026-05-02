@@ -104,6 +104,36 @@ class StatsResponse(BaseModel):
     high_priority_pending: int
 
 
+# ── Ownership helpers ─────────────────────────────────────────────────────────
+
+def _user_outreach_ids_sq(user_id: int):
+    """Scalar subquery: outreach email IDs belonging to user_id."""
+    user_camp_ids = (
+        select(Campaign.id)
+        .where(Campaign.user_id == user_id)
+        .scalar_subquery()
+    )
+    return (
+        select(OutreachEmail.id)
+        .where(OutreachEmail.campaign_id.in_(user_camp_ids))
+        .scalar_subquery()
+    )
+
+
+async def _get_owned_reply(reply_id: int, user_id: int, db: AsyncSession) -> EmailReply:
+    """Fetch a reply that belongs to the current user, or raise 404."""
+    result = await db.execute(
+        select(EmailReply).where(
+            EmailReply.id == reply_id,
+            EmailReply.outreach_email_id.in_(_user_outreach_ids_sq(user_id)),
+        )
+    )
+    reply = result.scalar_one_or_none()
+    if not reply:
+        raise HTTPException(status_code=404, detail="Reply not found")
+    return reply
+
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 async def _enrich_replies(replies: list, db: AsyncSession) -> list[ReplyResponse]:
@@ -214,15 +244,12 @@ async def _send_reply_via_gmail(reply_id: int, to: str, subject: str, body: str)
             logger.error("Cannot send reply %s — Gmail not connected", reply_id)
             return
 
-        # Load the AI response to get existing thread references
         ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
         ar_obj = ar_res.scalar_one_or_none()
 
-        # Gather threading headers
-        their_message_id = reply.message_id  # their reply's Message-ID
-        original_message_id = oe.message_id if oe else None  # our original outreach Message-ID
+        their_message_id = reply.message_id
+        original_message_id = oe.message_id if oe else None
 
-        # Build the References chain: original → their reply → (previous our replies from thread_references)
         existing_refs = ar_obj.thread_references if ar_obj else None
         ref_parts: list[str] = []
         if original_message_id:
@@ -235,12 +262,10 @@ async def _send_reply_via_gmail(reply_id: int, to: str, subject: str, body: str)
             ref_parts.append(their_message_id)
         references_header = " ".join(ref_parts) if ref_parts else None
 
-        # Normalise subject to use their exact subject (for thread grouping)
         final_subject = reply.subject or subject
         if final_subject and not final_subject.lower().startswith("re:"):
             final_subject = f"Re: {final_subject}"
 
-        # Generate our reply's Message-ID
         our_message_id = f"<{uuid.uuid4()}@outreach.tool>"
 
         try:
@@ -274,10 +299,8 @@ async def _send_reply_via_gmail(reply_id: int, to: str, subject: str, body: str)
             logger.error("Reply send failed for reply_id=%s: %s", reply_id, exc)
             return
 
-        # Mark sent and update thread references chain
         if ar_obj:
             ar_obj.is_sent = True
-            # Append our new Message-ID to the references chain
             new_refs = (references_header + " " + our_message_id).strip() if references_header else our_message_id
             ar_obj.thread_references = new_refs
             await db.commit()
@@ -292,14 +315,22 @@ async def get_stats(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> StatsResponse:
-    total_res = await db.execute(select(func.count(EmailReply.id)))
+    user_oe_ids = _user_outreach_ids_sq(user_id)
+
+    total_res = await db.execute(
+        select(func.count(EmailReply.id))
+        .where(EmailReply.outreach_email_id.in_(user_oe_ids))
+    )
     total = total_res.scalar() or 0
 
     hp_res = await db.execute(
         select(func.count(EmailReply.id))
         .outerjoin(AIResponse, AIResponse.reply_id == EmailReply.id)
-        .where(EmailReply.priority == "high")
-        .where(or_(AIResponse.id.is_(None), AIResponse.is_sent.is_(False)))
+        .where(
+            EmailReply.outreach_email_id.in_(user_oe_ids),
+            EmailReply.priority == "high",
+            or_(AIResponse.id.is_(None), AIResponse.is_sent.is_(False)),
+        )
     )
     high_priority_pending = hp_res.scalar() or 0
 
@@ -312,7 +343,12 @@ async def list_replies(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[ReplyResponse]:
-    query = select(EmailReply).order_by(EmailReply.received_at.desc())
+    user_oe_ids = _user_outreach_ids_sq(user_id)
+    query = (
+        select(EmailReply)
+        .where(EmailReply.outreach_email_id.in_(user_oe_ids))
+        .order_by(EmailReply.received_at.desc())
+    )
     if sentiment:
         query = query.where(EmailReply.sentiment == sentiment)
     result = await db.execute(query)
@@ -335,10 +371,7 @@ async def get_reply(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> ReplyResponse:
-    result = await db.execute(select(EmailReply).where(EmailReply.id == reply_id))
-    reply = result.scalar_one_or_none()
-    if not reply:
-        raise HTTPException(status_code=404, detail="Reply not found")
+    reply = await _get_owned_reply(reply_id, user_id, db)
     enriched = await _enrich_replies([reply], db)
     return enriched[0]
 
@@ -349,11 +382,7 @@ async def generate_response(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    result = await db.execute(select(EmailReply).where(EmailReply.id == reply_id))
-    reply = result.scalar_one_or_none()
-    if not reply:
-        raise HTTPException(status_code=404, detail="Reply not found")
-
+    reply = await _get_owned_reply(reply_id, user_id, db)
     outreach = await db.get(OutreachEmail, reply.outreach_email_id)
     suggested = await _generate_ai_reply(reply, outreach)
 
@@ -395,6 +424,8 @@ async def edit_response(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    await _get_owned_reply(reply_id, user_id, db)
+
     ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
     ar = ar_res.scalar_one_or_none()
     if ar:
@@ -417,6 +448,8 @@ async def approve_response(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    await _get_owned_reply(reply_id, user_id, db)
+
     ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
     ar = ar_res.scalar_one_or_none()
     if not ar:
@@ -432,10 +465,7 @@ async def send_response(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    result = await db.execute(select(EmailReply).where(EmailReply.id == reply_id))
-    reply = result.scalar_one_or_none()
-    if not reply:
-        raise HTTPException(status_code=404, detail="Reply not found")
+    reply = await _get_owned_reply(reply_id, user_id, db)
 
     ar_res = await db.execute(select(AIResponse).where(AIResponse.reply_id == reply_id))
     ar = ar_res.scalar_one_or_none()

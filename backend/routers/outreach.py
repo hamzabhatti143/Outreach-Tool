@@ -95,12 +95,13 @@ async def _upsert_app_setting(key: str, value: str, db: AsyncSession) -> None:
     await db.commit()
 
 
-async def _background_send_all(email_ids: list[int]) -> None:
-    """Send approved emails one-by-one with a 10s delay, tracking progress in app_settings."""
+async def _background_send_all(email_ids: list[int], user_id: int) -> None:
+    """Send approved emails one-by-one with a 10s delay, tracking per-user progress."""
     from db.database import retry_session
     from tools.mailer import send_email
     from sqlalchemy import delete as sa_delete
 
+    progress_key = f"send_progress_{user_id}"
     sent = 0
     failed = 0
     failed_ids: list[int] = []
@@ -132,7 +133,7 @@ async def _background_send_all(email_ids: list[int]) -> None:
                 "failed_ids": failed_ids,
                 "in_progress": (i + 1) < total,
             }
-            await _upsert_app_setting("send_progress", json.dumps(progress), db)
+            await _upsert_app_setting(progress_key, json.dumps(progress), db)
 
         if (i + 1) < total:
             await asyncio.sleep(10)
@@ -242,7 +243,7 @@ async def get_send_progress(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     result = await db.execute(
-        select(AppSettings).where(AppSettings.key == "send_progress")
+        select(AppSettings).where(AppSettings.key == f"send_progress_{user_id}")
     )
     setting = result.scalar_one_or_none()
     if not setting or not setting.value:
@@ -304,11 +305,11 @@ async def send_all_approved(
 
     email_ids = [e.id for e in emails]
 
-    # Initialise progress tracking
+    # Initialise per-user progress tracking
     progress = {"total": len(email_ids), "sent": 0, "failed": 0, "failed_ids": [], "in_progress": True}
-    await _upsert_app_setting("send_progress", json.dumps(progress), db)
+    await _upsert_app_setting(f"send_progress_{user_id}", json.dumps(progress), db)
 
-    background_tasks.add_task(_background_send_all, email_ids)
+    background_tasks.add_task(_background_send_all, email_ids, user_id)
 
     return {"message": f"Sending {len(email_ids)} emails", "total": len(email_ids)}
 
