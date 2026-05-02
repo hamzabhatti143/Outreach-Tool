@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Users, Send, Eye, Megaphone, AlertTriangle, ExternalLink, X } from "lucide-react";
+import { Users, Send, Eye, Megaphone, AlertTriangle, ExternalLink, X, Activity } from "lucide-react";
 import StatsWidget from "@/components/StatsWidget";
 import CampaignLauncher from "@/components/CampaignLauncher";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,6 +18,24 @@ interface SentLog {
   open_count: number;
 }
 
+interface CampaignActivityEvent {
+  id: number;
+  campaign_id: number;
+  event_type: string;
+  message: string;
+  created_at: string;
+}
+
+function timeAgo(iso: string) {
+  const diff = Date.now() - new Date(iso.endsWith("Z") ? iso : iso + "Z").getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return new Date(iso.endsWith("Z") ? iso : iso + "Z").toLocaleDateString();
+}
+
 const statusColor: Record<string, string> = {
   completed: "text-green-600 bg-green-50",
   running: "text-blue-600 bg-blue-50",
@@ -31,6 +49,7 @@ export default function DashboardPage() {
   const [sentLoading, setSentLoading] = useState(true);
   const [smtpMissing, setSmtpMissing] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [activityEvents, setActivityEvents] = useState<CampaignActivityEvent[]>([]);
 
   useEffect(() => {
     api.get<SentLog[]>("/sent")
@@ -40,6 +59,10 @@ export default function DashboardPage() {
 
     api.get<{ connected: boolean }>("/auth/gmail/status")
       .then((r) => { if (!r.data.connected) setSmtpMissing(true); })
+      .catch(() => {});
+
+    api.get<CampaignActivityEvent[]>("/campaigns/events")
+      .then((r) => setActivityEvents(r.data))
       .catch(() => {});
   }, []);
 
@@ -141,6 +164,31 @@ export default function DashboardPage() {
           )}
         </CardContent>
       </Card>
+
+      {activityEvents.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle className="text-base flex items-center gap-2"><Activity className="h-4 w-4 text-indigo-500" /> Recent Activity</CardTitle></CardHeader>
+          <CardContent>
+            <div className="divide-y divide-gray-100">
+              {activityEvents.map((ev) => (
+                <div key={ev.id} className="flex items-start justify-between py-2.5 gap-3">
+                  <div className="min-w-0">
+                    <span className={`inline-block text-xs font-medium px-1.5 py-0.5 rounded mr-2 ${
+                      ev.event_type === "scrape" ? "bg-blue-50 text-blue-700" :
+                      ev.event_type === "error"  ? "bg-red-50 text-red-700" :
+                                                   "bg-gray-100 text-gray-600"
+                    }`}>
+                      {ev.event_type}
+                    </span>
+                    <span className="text-sm text-gray-700">{ev.message}</span>
+                  </div>
+                  <span className="text-xs text-gray-400 shrink-0">{timeAgo(ev.created_at)}</span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader><CardTitle className="text-base">Recent Campaigns</CardTitle></CardHeader>

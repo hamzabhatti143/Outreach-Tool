@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from db.models import Lead, OutreachEmail, ValidityStatus, OutreachStatus
+from db.models import Lead, OutreachEmail, ValidityStatus, OutreachStatus, SentEmailRegistry
 
 _SUBJECT = "Fill Content Gaps and Outperform Your Competitors"
 
@@ -19,7 +19,7 @@ async def run_writer_agent(
 ) -> int:
     """
     Creates outreach emails from a fixed template for every eligible lead.
-    Skips if unsent drafts already exist for this campaign.
+    Skips leads already in the global sent registry or with existing drafts.
     Returns count of emails created.
     """
     # Hold off if pending/approved drafts still exist
@@ -65,6 +65,20 @@ async def run_writer_agent(
 
     if not targets:
         print(f"[writer_agent] All {len(leads)} leads already have outreach emails")
+        return 0
+
+    # Exclude leads already in the global sent registry
+    target_emails = [l.email for l in targets]
+    registry_res = await db.execute(
+        select(SentEmailRegistry.email).where(SentEmailRegistry.email.in_(target_emails))
+    )
+    already_sent: set[str] = {row[0] for row in registry_res.all()}
+    if already_sent:
+        print(f"[writer_agent] Skipping {len(already_sent)} leads already in global sent registry")
+    targets = [l for l in targets if l.email not in already_sent]
+
+    if not targets:
+        print(f"[writer_agent] All remaining leads already contacted globally")
         return 0
 
     print(f"[writer_agent] Creating {len(targets)} emails from fixed template")

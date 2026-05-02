@@ -3,11 +3,10 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from db.models import Lead, ValidityStatus
-from tools.scraper import scrape_emails
+from db.models import Lead, ValidityStatus, SentEmailRegistry, CampaignEvent
 
 _SCRAPE_CONCURRENCY = 10
-_MAX_LEADS_PER_CAMPAIGN = 20
+_MAX_LEADS_PER_CAMPAIGN = 500  # High cap; dedup logic prevents true duplicates
 
 
 async def run_scraper_agent(
@@ -17,7 +16,8 @@ async def run_scraper_agent(
 ) -> int:
     """
     Scrapes all blog sources concurrently.
-    Uses INSERT ... ON CONFLICT DO NOTHING to silently skip duplicate emails.
+    Skips emails already in the global sent registry.
+    Uses INSERT ... ON CONFLICT DO NOTHING for race-safe inserts.
     Returns count of new emails saved.
     """
     # Remove duplicate leads from previous runs
@@ -35,6 +35,7 @@ async def run_scraper_agent(
             return []
         async with sem:
             try:
+                from tools.scraper import scrape_emails
                 emails = await scrape_emails(url)
                 return [(email.lower(), source_id) for email in emails]
             except Exception as e:
@@ -47,6 +48,16 @@ async def run_scraper_agent(
     if not all_results:
         return 0
 
+    # Load global sent registry to skip already-contacted addresses
+    all_emails = list({email for email, _ in all_results})
+    if all_emails:
+        registry_result = await db.execute(
+            select(SentEmailRegistry.email).where(SentEmailRegistry.email.in_(all_emails))
+        )
+        already_sent_globally: set[str] = {row[0] for row in registry_result.all()}
+    else:
+        already_sent_globally = set()
+
     # Count existing leads for the cap check
     existing_result = await db.execute(
         select(Lead.email).where(Lead.campaign_id == campaign_id)
@@ -54,6 +65,7 @@ async def run_scraper_agent(
     existing_emails: set[str] = {row[0] for row in existing_result.all()}
 
     new_count = 0
+    skipped_registry = 0
     seen_in_batch: set[str] = set()
     slots_left = _MAX_LEADS_PER_CAMPAIGN - len(existing_emails)
 
@@ -61,6 +73,9 @@ async def run_scraper_agent(
         if slots_left <= 0:
             print(f"[scraper_agent] Lead cap ({_MAX_LEADS_PER_CAMPAIGN}) reached — stopping")
             break
+        if email in already_sent_globally:
+            skipped_registry += 1
+            continue
         if email in existing_emails or email in seen_in_batch:
             continue
 
@@ -85,4 +100,17 @@ async def run_scraper_agent(
             slots_left -= 1
 
     await db.commit()
+
+    # Log scrape results as a campaign event
+    if new_count > 0 or skipped_registry > 0:
+        parts = [f"Scraped {new_count} new lead{'' if new_count == 1 else 's'}"]
+        if skipped_registry > 0:
+            parts.append(f"skipped {skipped_registry} already-contacted")
+        db.add(CampaignEvent(
+            campaign_id=campaign_id,
+            event_type="scrape",
+            message=", ".join(parts),
+        ))
+        await db.commit()
+
     return new_count

@@ -96,9 +96,10 @@ async def _upsert_app_setting(key: str, value: str, db: AsyncSession) -> None:
 
 
 async def _background_send_all(email_ids: list[int]) -> None:
-    """Send approved emails one-by-one with a 2s delay, tracking progress in app_settings."""
+    """Send approved emails one-by-one with a 10s delay, tracking progress in app_settings."""
     from db.database import retry_session
     from tools.mailer import send_email
+    from sqlalchemy import delete as sa_delete
 
     sent = 0
     failed = 0
@@ -109,8 +110,13 @@ async def _background_send_all(email_ids: list[int]) -> None:
         async with retry_session() as db:
             try:
                 result = await send_email(email_id, db)
-                if result["status"] == "sent":
+                if result["status"] in ("sent", "skipped"):
                     sent += 1
+                    # Delete the sent row — it's no longer needed in the outreach list
+                    await db.execute(
+                        sa_delete(OutreachEmail).where(OutreachEmail.id == email_id)
+                    )
+                    await db.commit()
                 else:
                     failed += 1
                     failed_ids.append(email_id)
@@ -129,7 +135,7 @@ async def _background_send_all(email_ids: list[int]) -> None:
             await _upsert_app_setting("send_progress", json.dumps(progress), db)
 
         if (i + 1) < total:
-            await asyncio.sleep(2)
+            await asyncio.sleep(10)
 
 
 async def _get_owned_email(email_id: int, user_id: int, db: AsyncSession) -> OutreachEmail:

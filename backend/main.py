@@ -63,39 +63,11 @@ async def _check_and_reset_quota() -> None:
 
 async def _resume_research_for_campaign(campaign_id: int, niche: str, user_id: int) -> None:
     """
-    Re-run the research → scrape → write pipeline for a quota-paused campaign.
-    search_blogs continues from the saved pagination offset automatically.
+    Resume a quota-paused campaign by restarting the continuous pipeline loop.
+    Pagination state is preserved on the Campaign row so the loop picks up where it left off.
     """
-    from db.database import retry_session
-    from tools.search import search_blogs, QuotaExceededException
-    from pipeline.scraper_agent import run_scraper_agent
-    from pipeline.writer_agent import run_writer_agent
-    from db.models import Campaign, CampaignStatus
-
-    async with retry_session() as db:
-        try:
-            new_sources = await search_blogs(niche, campaign_id, db, user_id=user_id)
-            logger.info("[resume] Campaign %d found %d new sources", campaign_id, len(new_sources))
-
-            if new_sources:
-                count = await run_scraper_agent(new_sources, campaign_id, db)
-                logger.info("[resume] Campaign %d scraped %d new leads", campaign_id, count)
-                await run_writer_agent(campaign_id, niche, db)
-
-            campaign = await db.get(Campaign, campaign_id)
-            if campaign and campaign.status == CampaignStatus.running:
-                campaign.status = CampaignStatus.completed
-            await db.commit()
-
-        except QuotaExceededException:
-            logger.warning("[resume] Campaign %d hit quota again — staying paused", campaign_id)
-
-        except Exception as exc:
-            logger.error("[resume] Campaign %d failed: %s", campaign_id, exc)
-            campaign = await db.get(Campaign, campaign_id)
-            if campaign:
-                campaign.status = CampaignStatus.error
-            await db.commit()
+    from routers.campaigns import _run_pipeline
+    await _run_pipeline(campaign_id, niche, user_id)
 
 
 async def _quota_reset_loop() -> None:

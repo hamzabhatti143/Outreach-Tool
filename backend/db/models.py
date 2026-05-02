@@ -35,7 +35,6 @@ class SentStatus(str, enum.Enum):
     failed = "failed"
 
 
-# native_enum=False stores as VARCHAR — avoids asyncpg native enum type conflicts
 def _enum(enum_cls):
     return Enum(enum_cls, native_enum=False)
 
@@ -49,7 +48,6 @@ class User(Base):
     name = Column(String(255), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
-    # Per-user Gmail OAuth credentials (user brings their own Google Cloud project)
     google_client_id = Column(String(500), nullable=True)
     google_client_secret = Column(String(500), nullable=True)
     google_redirect_uri = Column(String(500), nullable=True)
@@ -70,7 +68,6 @@ class Campaign(Base):
     status = Column(_enum(CampaignStatus), default=CampaignStatus.idle, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
-    # Pagination state for SerpAPI — persisted so we resume where we left off
     last_search_page = Column(Integer, default=0, nullable=False)
     last_search_query_index = Column(Integer, default=0, nullable=False)
     total_blogs_fetched = Column(Integer, default=0, nullable=False)
@@ -80,6 +77,7 @@ class Campaign(Base):
     blog_sources = relationship("BlogSource", back_populates="campaign", cascade="all, delete-orphan")
     leads = relationship("Lead", back_populates="campaign", cascade="all, delete-orphan")
     outreach_emails = relationship("OutreachEmail", back_populates="campaign", cascade="all, delete-orphan")
+    events = relationship("CampaignEvent", back_populates="campaign", cascade="all, delete-orphan")
 
 
 class SearchQuery(Base):
@@ -143,7 +141,7 @@ class OutreachEmail(Base):
     status = Column(_enum(OutreachStatus), default=OutreachStatus.pending, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     approved_at = Column(DateTime, nullable=True)
-    # Message-ID of the outreach email we sent — used for email thread continuity
+    sent_at = Column(DateTime, nullable=True)
     message_id = Column(String(500), nullable=True)
 
     lead = relationship("Lead", back_populates="outreach_emails")
@@ -201,16 +199,42 @@ class AIResponse(Base):
     is_approved = Column(Boolean, default=False, nullable=False)
     is_sent = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
-    # Full chain of Message-IDs for the thread: "orig_id reply1_id our_reply_id ..."
     thread_references = Column(Text, nullable=True)
 
     reply = relationship("EmailReply", back_populates="ai_response")
 
 
 class AppSettings(Base):
-    """Simple key/value store for app-wide state (quota timestamps, job progress, etc.)."""
     __tablename__ = "app_settings"
 
     key = Column(String(255), primary_key=True)
     value = Column(Text, nullable=True)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class SentEmailRegistry(Base):
+    """
+    Global registry of every email address we have ever sent to.
+    UNIQUE(email) ensures one address can only be sent to once, across all campaigns.
+    This is the master dedup source checked before scraping, writing, and sending.
+    """
+    __tablename__ = "sent_email_registry"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    outreach_email_id = Column(Integer, ForeignKey("outreach_emails.id", ondelete="SET NULL"), nullable=True)
+    sent_at = Column(DateTime, server_default=func.now())
+
+
+class CampaignEvent(Base):
+    """Activity log for a campaign — scrape results, errors, milestones."""
+    __tablename__ = "campaign_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False)
+    event_type = Column(String(50), nullable=False)
+    message = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    campaign = relationship("Campaign", back_populates="events")

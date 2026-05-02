@@ -5,6 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { isAuthenticated } from "@/lib/auth";
 import { CampaignProvider } from "@/lib/campaign-context";
+import ErrorBoundary from "@/components/ErrorBoundary";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -32,7 +33,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </p>
           </header>
           <main className="flex-1 overflow-y-auto p-6">
-            {children}
+            <ErrorBoundary>
+              {children}
+            </ErrorBoundary>
           </main>
         </div>
       </div>

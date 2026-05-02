@@ -149,7 +149,7 @@ async def scrape_emails(url: str) -> list[str]:
                 if response.status_code == 200:
                     return _extract_emails_from_html(response.text)
             except Exception as e:
-                print(f"[scraper] Failed {page_url}: {e}")
+                print(f"[scraper] Failed {page_url}: {type(e).__name__}: {e}")
             return set()
 
         results = await asyncio.gather(*[fetch_page(p) for p in pages])

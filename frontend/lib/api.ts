@@ -1,7 +1,19 @@
 import axios, { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse } from "axios";
 import { getAccessToken, getRefreshToken, setTokens, clearTokens } from "./auth";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://hamzabhatti-outreach-tool-82fb335.hf.space";
+const _SENSITIVE_SERVICES = ["serpapi", "asyncpg", "postgresql", "psycopg", "sqlalchemy", "DETAIL:", "HINT:"];
+
+function _sanitizeDetail(detail: unknown): string {
+  if (typeof detail !== "string") return String(detail ?? "Something went wrong");
+  let msg = detail;
+  for (const svc of _SENSITIVE_SERVICES) {
+    msg = msg.replace(new RegExp(svc + "[^\\s]*", "gi"), "[service]");
+  }
+  msg = msg.replace(/\(Background on this error at:.*?\)/g, "").trim();
+  return msg || "Something went wrong";
+}
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const api: AxiosInstance = axios.create({
   baseURL: API_URL,
@@ -35,6 +47,11 @@ function processQueue(error: unknown, token: string | null = null) {
 api.interceptors.response.use(
   (response: AxiosResponse) => response,
   async (error) => {
+    // Sanitize service names from error details before propagating
+    if (error.response?.data?.detail) {
+      error.response.data.detail = _sanitizeDetail(error.response.data.detail);
+    }
+
     const originalRequest = error.config;
 
     if (error.response?.status === 401 && !originalRequest._retry) {

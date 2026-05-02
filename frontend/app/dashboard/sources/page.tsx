@@ -26,6 +26,12 @@ interface CampaignStats {
 
 type SortField = keyof Source;
 
+function formatDate(iso: string) {
+  // Append Z so the browser parses as UTC, then converts to local timezone for display
+  const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
 export default function SourcesPage() {
   const { campaigns, selectedId, setSelectedId } = useCampaigns();
   const [sources, setSources] = useState<Source[]>([]);
@@ -194,7 +200,7 @@ export default function SourcesPage() {
                       </td>
                       <td className="px-4 py-3 text-gray-700">{s.email_count}</td>
                       <td className="px-4 py-3 text-gray-500">
-                        {new Date(s.found_at).toLocaleDateString()}
+                        {formatDate(s.found_at)}
                       </td>
                       {showAll && (
                         <td className="px-4 py-3">

@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from pydantic import BaseModel
 from datetime import datetime
 from db.database import get_db
-from db.models import Lead, BlogSource, Campaign, ValidityStatus
+from db.models import Lead, BlogSource, Campaign, ValidityStatus, OutreachEmail, OutreachStatus
 from utils.auth import get_current_user_id
 from utils.export import leads_to_csv
 from tools.validator import validate_email
@@ -38,9 +38,53 @@ async def _get_campaign_or_404(campaign_id: int, user_id: int, db: AsyncSession)
         raise HTTPException(status_code=404, detail="Campaign not found")
 
 
+@router.get("/campaigns/{campaign_id}/leads/counts")
+async def get_lead_counts(
+    campaign_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _get_campaign_or_404(campaign_id, user_id, db)
+
+    # Subquery: lead_ids with at least one sent outreach email
+    sent_lead_ids_sq = (
+        select(OutreachEmail.lead_id)
+        .where(
+            OutreachEmail.campaign_id == campaign_id,
+            OutreachEmail.status == OutreachStatus.sent,
+        )
+        .scalar_subquery()
+    )
+
+    base = select(func.count(Lead.id)).where(
+        Lead.campaign_id == campaign_id,
+        Lead.is_duplicate.is_(False),
+    )
+
+    all_res = await db.execute(base)
+    new_res = await db.execute(
+        base.where(
+            ~Lead.id.in_(sent_lead_ids_sq),
+            Lead.validity_status.in_([ValidityStatus.valid, ValidityStatus.unverified]),
+        )
+    )
+    contacted_res = await db.execute(base.where(Lead.id.in_(sent_lead_ids_sq)))
+    invalid_res = await db.execute(
+        base.where(Lead.validity_status == ValidityStatus.invalid)
+    )
+
+    return {
+        "all": all_res.scalar() or 0,
+        "new": new_res.scalar() or 0,
+        "contacted": contacted_res.scalar() or 0,
+        "invalid": invalid_res.scalar() or 0,
+    }
+
+
 @router.get("/campaigns/{campaign_id}/leads", response_model=list[LeadResponse])
 async def list_leads(
     campaign_id: int,
+    tab: str = Query(default="all"),
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[LeadResponse]:
@@ -52,13 +96,32 @@ async def list_leads(
     )
     await db.commit()
 
-    # Fetch only non-duplicate leads
-    result = await db.execute(
-        select(Lead).where(
-            Lead.campaign_id == campaign_id,
-            Lead.is_duplicate == False,
-        ).order_by(Lead.id.desc())
+    # Subquery: lead_ids with at least one sent outreach email
+    sent_lead_ids_sq = (
+        select(OutreachEmail.lead_id)
+        .where(
+            OutreachEmail.campaign_id == campaign_id,
+            OutreachEmail.status == OutreachStatus.sent,
+        )
+        .scalar_subquery()
     )
+
+    query = select(Lead).where(
+        Lead.campaign_id == campaign_id,
+        Lead.is_duplicate.is_(False),
+    )
+
+    if tab == "new":
+        query = query.where(
+            ~Lead.id.in_(sent_lead_ids_sq),
+            Lead.validity_status.in_([ValidityStatus.valid, ValidityStatus.unverified]),
+        )
+    elif tab == "contacted":
+        query = query.where(Lead.id.in_(sent_lead_ids_sq))
+    elif tab == "invalid":
+        query = query.where(Lead.validity_status == ValidityStatus.invalid)
+
+    result = await db.execute(query.order_by(Lead.id.desc()))
     leads = result.scalars().all()
 
     # Batch-load blog names in one query
@@ -101,7 +164,7 @@ async def validate_leads(
         try:
             v = await validate_email(lead.email)
             lead.validity_status = ValidityStatus(v["status"])
-            lead.validated_at = datetime.utcnow()  # naive UTC — matches TIMESTAMP WITHOUT TIME ZONE column
+            lead.validated_at = datetime.utcnow()
         except Exception as e:
             print(f"[validate] Error for {lead.email}: {e}")
 
@@ -130,7 +193,7 @@ async def export_leads(
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     await _get_campaign_or_404(campaign_id, user_id, db)
-    leads = await list_leads(campaign_id, user_id, db)
+    leads = await list_leads(campaign_id, "all", user_id, db)
     csv_data = leads_to_csv([l.model_dump() for l in leads])
     return StreamingResponse(
         io.StringIO(csv_data),

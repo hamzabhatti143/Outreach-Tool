@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Loader2, Check, X, Edit2, Save, CheckCheck,
   Mail, ChevronLeft, RefreshCw, AlertCircle,
-  Play, Clock, CheckCircle, Zap, Sparkles, Send,
+  Play, Clock, CheckCircle, Zap, Sparkles, Send, PartyPopper,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,6 +33,7 @@ interface CampaignStats {
   leads: number;
   pending_outreach: number;
   approved_outreach: number;
+  sent_outreach: number;
 }
 
 interface SendProgress {
@@ -58,7 +59,7 @@ export default function OutreachPage() {
 
   const [emails, setEmails] = useState<OutreachEmail[]>([]);
   const [stats, setStats] = useState<CampaignStats | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("pending");
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [generateResult, setGenerateResult] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -131,10 +132,12 @@ export default function OutreachPage() {
       clearInterval(pollRef.current);
       pollRef.current = null;
       setSendingAll(false);
-      showSuccess(
-        `Send complete — Sent: ${sendProgress.sent} | Failed: ${sendProgress.failed}`
-      );
-      if (selectedId) load(selectedId);
+      const msg = sendProgress.failed > 0
+        ? `Sent ${sendProgress.sent} · ${sendProgress.failed} failed (see Failed tab)`
+        : `All ${sendProgress.sent} emails sent successfully`;
+      showSuccess(msg);
+      setStatusFilter(sendProgress.failed > 0 ? "failed" : "pending");
+      if (selectedId) load(selectedId, sendProgress.failed > 0 ? "failed" : "pending");
     }
   }, [sendProgress, selectedId, load]);
 
@@ -180,8 +183,9 @@ export default function OutreachPage() {
       const { data } = await api.post<{ approved_count: number }>("/outreach/approve-all", {
         campaign_id: selectedId,
       });
-      showSuccess(`${data.approved_count} email${data.approved_count !== 1 ? "s" : ""} approved`);
-      await load(selectedId);
+      showSuccess(`${data.approved_count} email${data.approved_count !== 1 ? "s" : ""} approved — click Send All Approved to send`);
+      setStatusFilter("pending");
+      await load(selectedId, "pending");
     } catch {
       setError("Failed to approve all emails.");
     } finally {
@@ -257,9 +261,10 @@ export default function OutreachPage() {
     setActionLoading("approve");
     try {
       await api.patch(`/outreach/${id}/approve`);
-      if (selectedId) await load(selectedId);
       setOpen(null);
-      showSuccess("Email approved — go to Bulk Send to send it");
+      setStatusFilter("pending");
+      if (selectedId) await load(selectedId, "pending");
+      showSuccess("Email approved — click Send All Approved to send it");
     } catch {
       setError("Failed to approve email.");
     } finally {
@@ -365,6 +370,18 @@ export default function OutreachPage() {
           <p className="text-xs mt-1 text-gray-400">
             {stats.approved_outreach} email{stats.approved_outreach !== 1 ? "s" : ""} ready in{" "}
             <span className="text-indigo-600 font-medium">Bulk Send</span>.
+          </p>
+        </div>
+      );
+    }
+    if (stats && stats.sent_outreach > 0 && stats.pending_outreach === 0 && stats.approved_outreach === 0) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full py-20 text-center px-6">
+          <PartyPopper className="h-10 w-10 mb-3 text-green-500" />
+          <p className="text-sm font-semibold text-gray-700">All caught up!</p>
+          <p className="text-xs mt-1 text-gray-400 max-w-xs">
+            {stats.sent_outreach} email{stats.sent_outreach !== 1 ? "s" : ""} sent.
+            Run the pipeline again to find more leads.
           </p>
         </div>
       );

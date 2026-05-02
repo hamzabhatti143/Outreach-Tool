@@ -123,6 +123,15 @@ _NEW_MIGRATIONS = [
     "ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS message_id VARCHAR(500)",
     # AI response thread reference chain
     "ALTER TABLE ai_responses ADD COLUMN IF NOT EXISTS thread_references TEXT",
+    # Deduplicate before creating unique indexes (keeps the lowest id per group)
+    """DELETE FROM leads
+       WHERE id NOT IN (
+           SELECT MIN(id) FROM leads GROUP BY campaign_id, email
+       )""",
+    """DELETE FROM blog_sources
+       WHERE id NOT IN (
+           SELECT MIN(id) FROM blog_sources GROUP BY campaign_id, url
+       )""",
     # Unique indexes for deduplication
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_leads_campaign_email ON leads (campaign_id, email)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_blog_sources_campaign_url ON blog_sources (campaign_id, url)",
@@ -132,6 +141,8 @@ _NEW_MIGRATIONS = [
         value TEXT,
         updated_at TIMESTAMP DEFAULT NOW()
     )""",
+    # Outreach email send timestamp
+    "ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP",
 ]
 
 

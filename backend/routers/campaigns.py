@@ -1,16 +1,20 @@
 import asyncio
+import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
 from db.database import get_db
-from db.models import Campaign, CampaignStatus, Lead, ValidityStatus, BlogSource, OutreachEmail, OutreachStatus
+from db.models import Campaign, CampaignStatus, Lead, ValidityStatus, BlogSource, OutreachEmail, OutreachStatus, CampaignEvent
 from utils.auth import get_current_user_id
 from pipeline.research_agent import run_research_agent
 from pipeline.scraper_agent import run_scraper_agent
 from pipeline.writer_agent import run_writer_agent
 from tools.validator import validate_email
+from tools.search import QuotaExceededException
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
@@ -63,6 +67,32 @@ async def create_campaign(
     return CampaignResponse.from_campaign(campaign)
 
 
+@router.get("/events")
+async def list_campaign_events(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 20,
+) -> list[dict]:
+    user_camp_ids = select(Campaign.id).where(Campaign.user_id == user_id).scalar_subquery()
+    result = await db.execute(
+        select(CampaignEvent)
+        .where(CampaignEvent.campaign_id.in_(user_camp_ids))
+        .order_by(CampaignEvent.created_at.desc())
+        .limit(limit)
+    )
+    events = result.scalars().all()
+    return [
+        {
+            "id": e.id,
+            "campaign_id": e.campaign_id,
+            "event_type": e.event_type,
+            "message": e.message,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in events
+    ]
+
+
 @router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_campaign(
     campaign_id: int,
@@ -81,117 +111,152 @@ async def delete_campaign(
 
 async def _run_pipeline(campaign_id: int, niche: str, user_id: int | None = None) -> None:
     """
-    Resumable pipeline: each step checks existing data and skips if already done.
-    Order: research → scrape (new sources only) → write (new leads only) → validate (unverified only)
+    Continuous pipeline loop — keeps running until the user stops it.
+    Each iteration: research (≥30 new blogs) → scrape emails → write drafts → validate.
+    Uses a separate DB session per step to avoid long-lived connections.
+    Backs off exponentially when no new blogs are found.
     """
     from db.database import retry_session
 
+    logger.info("[pipeline] Campaign %d starting continuous loop", campaign_id)
+
+    # ── Mark running ─────────────────────────────────────────────────────────
     async with retry_session() as db:
         result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
         campaign = result.scalar_one_or_none()
         if not campaign:
             return
-
         campaign.status = CampaignStatus.running
+        db.add(CampaignEvent(campaign_id=campaign_id, event_type="pipeline",
+                             message="Pipeline started"))
         await db.commit()
 
-        async def _check_stop() -> bool:
-            """Return True (and reset status) if a stop was requested."""
-            if campaign_id not in _stop_requested:
-                return False
-            _stop_requested.discard(campaign_id)
-            res = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-            c = res.scalar_one_or_none()
-            if c:
-                c.status = CampaignStatus.idle
-                await db.commit()
-            print(f"[pipeline] Campaign {campaign_id} stopped by user request")
-            return True
+    consecutive_empty = 0  # Rounds with zero new blogs found
 
+    while campaign_id not in _stop_requested:
+
+        # ── Step 1: Research — always search for more blogs ──────────────────
+        new_sources: list[dict] = []
         try:
-            # ── Step 1: Research ──────────────────────────────────────────
-            # Skip if sources already exist; otherwise fetch new ones via SerpAPI.
-            existing_sources_result = await db.execute(
-                select(BlogSource).where(BlogSource.campaign_id == campaign_id)
-            )
-            existing_sources = existing_sources_result.scalars().all()
-
-            if existing_sources:
-                print(f"[pipeline] Skipping research — {len(existing_sources)} sources already exist")
-                sources = [{"id": s.id, "url": s.url, "blog_name": s.blog_name} for s in existing_sources]
-            else:
-                sources = await run_research_agent(niche, campaign_id, db, user_id=user_id)
-                print(f"[pipeline] Research found {len(sources)} sources")
-
-            if await _check_stop(): return
-
-            # ── Step 2: Scrape ────────────────────────────────────────────
-            # Only scrape sources that have no leads associated yet.
-            scraped_ids_result = await db.execute(
-                select(Lead.source_blog_id).where(
-                    Lead.campaign_id == campaign_id,
-                    Lead.source_blog_id.isnot(None),
-                )
-            )
-            already_scraped: set[int] = {row[0] for row in scraped_ids_result.all()}
-            new_sources = [s for s in sources if s.get("id") not in already_scraped]
-
-            if new_sources:
-                count = await run_scraper_agent(new_sources, campaign_id, db)
-                print(f"[pipeline] Scraped {count} new leads from {len(new_sources)} sources")
-            else:
-                print(f"[pipeline] Skipping scrape — all sources already scraped")
-
-            if await _check_stop(): return
-
-            # ── Step 3: Write ─────────────────────────────────────────────
-            # Writer agent skips leads that already have a pending/approved/sent email.
-            generated = await run_writer_agent(campaign_id, niche, db)
-            print(f"[pipeline] Generated {generated} new outreach emails")
-
-            if await _check_stop(): return
-
-            # ── Step 4: Validate ──────────────────────────────────────────
-            # Only validate leads still marked unverified.
-            unverified_result = await db.execute(
-                select(Lead).where(
-                    Lead.campaign_id == campaign_id,
-                    Lead.validity_status == ValidityStatus.unverified,
-                )
-            )
-            unverified = unverified_result.scalars().all()
-
-            if unverified:
-                async def _validate(lead: Lead) -> None:
-                    try:
-                        v = await validate_email(lead.email)
-                        lead.validity_status = ValidityStatus(v["status"])
-                        lead.validated_at = datetime.utcnow()
-                    except Exception:
-                        pass
-
-                await asyncio.gather(*[_validate(lead) for lead in unverified])
-                await db.commit()
-                print(f"[pipeline] Validated {len(unverified)} leads")
-            else:
-                print(f"[pipeline] Skipping validation — no unverified leads")
-
-            # Mark complete
+            async with retry_session() as db:
+                new_sources = await run_research_agent(niche, campaign_id, db,
+                                                       user_id=user_id)
+            logger.info("[pipeline] Campaign %d: found %d new blogs this round",
+                        campaign_id, len(new_sources))
+        except QuotaExceededException:
+            logger.warning("[pipeline] Campaign %d: SerpAPI quota exceeded — pausing",
+                           campaign_id)
+            # _handle_quota_exceeded already set status = quota_paused
             _stop_requested.discard(campaign_id)
-            result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-            campaign = result.scalar_one_or_none()
-            if campaign:
-                campaign.status = CampaignStatus.completed
-            await db.commit()
+            return
+        except Exception as exc:
+            logger.error("[pipeline] Campaign %d research error: %s", campaign_id, exc)
 
-        except Exception as e:
-            _stop_requested.discard(campaign_id)
-            result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-            campaign = result.scalar_one_or_none()
-            if campaign:
-                campaign.status = CampaignStatus.error
-            await db.commit()
-            print(f"[pipeline] Error for campaign {campaign_id}: {e}")
+        if campaign_id in _stop_requested:
+            break
+
+        # ── Step 2: Scrape new blogs for emails ──────────────────────────────
+        if new_sources:
+            try:
+                async with retry_session() as db:
+                    count = await run_scraper_agent(new_sources, campaign_id, db)
+                logger.info("[pipeline] Campaign %d: scraped %d new emails from %d blogs",
+                            campaign_id, count, len(new_sources))
+            except Exception as exc:
+                logger.error("[pipeline] Campaign %d scrape error: %s", campaign_id, exc)
+
+        if campaign_id in _stop_requested:
+            break
+
+        # ── Step 3: Write outreach drafts ────────────────────────────────────
+        try:
+            async with retry_session() as db:
+                generated = await run_writer_agent(campaign_id, niche, db)
+            if generated:
+                logger.info("[pipeline] Campaign %d: created %d new outreach drafts",
+                            campaign_id, generated)
+        except Exception as exc:
+            logger.error("[pipeline] Campaign %d writer error: %s", campaign_id, exc)
+
+        if campaign_id in _stop_requested:
+            break
+
+        # ── Step 3.5: Auto-send new drafts ───────────────────────────────────
+        try:
+            from pipeline.sender_agent import auto_send_campaign
+            summary = await auto_send_campaign(
+                campaign_id,
+                is_stopped=lambda: campaign_id in _stop_requested,
+            )
+            if summary["sent"] or summary["failed"]:
+                logger.info("[pipeline] Campaign %d: auto-sent %d, failed %d",
+                            campaign_id, summary["sent"], summary["failed"])
+        except Exception as exc:
+            logger.error("[pipeline] Campaign %d auto-send error: %s", campaign_id, exc)
+
+        if campaign_id in _stop_requested:
+            break
+
+        # ── Step 4: Validate unverified leads ────────────────────────────────
+        try:
+            async with retry_session() as db:
+                unverified_result = await db.execute(
+                    select(Lead).where(
+                        Lead.campaign_id == campaign_id,
+                        Lead.validity_status == ValidityStatus.unverified,
+                    )
+                )
+                unverified = unverified_result.scalars().all()
+                if unverified:
+                    async def _validate(lead: Lead) -> None:
+                        try:
+                            v = await validate_email(lead.email)
+                            lead.validity_status = ValidityStatus(v["status"])
+                            lead.validated_at = datetime.utcnow()
+                        except Exception:
+                            pass
+                    await asyncio.gather(*[_validate(lead) for lead in unverified])
+                    await db.commit()
+                    logger.info("[pipeline] Campaign %d: validated %d leads",
+                                campaign_id, len(unverified))
+        except Exception as exc:
+            logger.error("[pipeline] Campaign %d validate error: %s", campaign_id, exc)
+
+        if campaign_id in _stop_requested:
+            break
+
+        # ── Throttle ─────────────────────────────────────────────────────────
+        if not new_sources:
+            consecutive_empty += 1
+            # Back off: 60s → 120s → 180s … capped at 10 minutes
+            wait_secs = min(60 * consecutive_empty, 600)
+            logger.info(
+                "[pipeline] Campaign %d: no new blogs — waiting %ds before next round "
+                "(empty round #%d)",
+                campaign_id, wait_secs, consecutive_empty,
+            )
+            elapsed = 0
+            while elapsed < wait_secs and campaign_id not in _stop_requested:
+                await asyncio.sleep(1)
+                elapsed += 1
+        else:
+            consecutive_empty = 0
+            await asyncio.sleep(2)  # Brief pause between active rounds
+
+    # ── Cleanup ──────────────────────────────────────────────────────────────
+    _stop_requested.discard(campaign_id)
+    async with retry_session() as db:
+        result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+        campaign = result.scalar_one_or_none()
+        if campaign:
+            status_val = (campaign.status.value
+                          if hasattr(campaign.status, "value") else str(campaign.status))
+            if status_val != "quota_paused":
+                campaign.status = CampaignStatus.idle
+            db.add(CampaignEvent(campaign_id=campaign_id, event_type="pipeline",
+                                 message="Pipeline stopped"))
+        await db.commit()
+    logger.info("[pipeline] Campaign %d stopped", campaign_id)
 
 
 @router.get("/{campaign_id}/stats")
@@ -224,6 +289,12 @@ async def campaign_stats(
             OutreachEmail.status == OutreachStatus.approved,
         )
     )
+    sent_res = await db.execute(
+        select(func.count(OutreachEmail.id)).where(
+            OutreachEmail.campaign_id == campaign_id,
+            OutreachEmail.status == OutreachStatus.sent,
+        )
+    )
 
     # Reload campaign for pagination stats
     camp_res2 = await db.execute(
@@ -236,6 +307,7 @@ async def campaign_stats(
         "leads": leads_res.scalar() or 0,
         "pending_outreach": pending_res.scalar() or 0,
         "approved_outreach": approved_res.scalar() or 0,
+        "sent_outreach": sent_res.scalar() or 0,
         "total_blogs_fetched": (camp.total_blogs_fetched or 0) if camp else 0,
         "last_search_page": (camp.last_search_page or 0) if camp else 0,
     }
