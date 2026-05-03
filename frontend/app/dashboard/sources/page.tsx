@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Download, Loader2, ExternalLink, Eye, EyeOff } from "lucide-react";
+import { Pagination } from "@/components/ui/pagination";
+import { getCached, setCached } from "@/lib/cache";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
@@ -40,14 +42,23 @@ export default function SourcesPage() {
   const [sortField, setSortField] = useState<SortField>("found_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [stats, setStats] = useState<CampaignStats | null>(null);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 25;
 
   const load = useCallback(async () => {
     if (!selectedId) return;
-    setLoading(true);
+    const key = `sources_${selectedId}_${showAll}`;
+    const cached = getCached<Source[]>(key);
+    if (cached) { setSources(cached); setLoading(false); }
+    else setLoading(true);
+    setPage(1);
     try {
       const params = showAll ? "?show_all=true" : "";
       const { data } = await api.get<Source[]>(`/campaigns/${selectedId}/sources${params}`);
       setSources(data);
+      setCached(key, data);
+    } catch {
+      // keep cached data on network failure
     } finally {
       setLoading(false);
     }
@@ -73,6 +84,7 @@ export default function SourcesPage() {
     const cmp = String(a[sortField] ?? "").localeCompare(String(b[sortField] ?? ""), undefined, { numeric: true });
     return sortDir === "asc" ? cmp : -cmp;
   });
+  const paginated = sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const SortIcon = ({ field }: { field: SortField }) => (
     <span className="ml-1 text-gray-400">
@@ -182,7 +194,7 @@ export default function SourcesPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {sorted.map((s) => (
+                  {paginated.map((s) => (
                     <tr key={s.id} className="hover:bg-gray-50 transition-colors">
                       <td className="px-4 py-3 font-medium text-gray-900">{s.blog_name || "—"}</td>
                       <td className="px-4 py-3">
@@ -215,6 +227,11 @@ export default function SourcesPage() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+          {sorted.length > PAGE_SIZE && (
+            <div className="px-4 pb-3">
+              <Pagination page={page} pageSize={PAGE_SIZE} total={sorted.length} onChange={setPage} />
             </div>
           )}
         </CardContent>

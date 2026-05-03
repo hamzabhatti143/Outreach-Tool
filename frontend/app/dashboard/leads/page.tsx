@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Download, Loader2, RefreshCw, Trash2 } from "lucide-react";
+import { Pagination } from "@/components/ui/pagination";
+import { getCached, setCached } from "@/lib/cache";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
@@ -45,21 +47,27 @@ export default function LeadsPage() {
   const [search, setSearch] = useState("");
   const [validating, setValidating] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 25;
 
   const load = useCallback(async (tab: Tab) => {
     if (!selectedId) return;
-    setLoading(true);
+    const key = `leads_${selectedId}_${tab}`;
+    const cached = getCached<Lead[]>(key);
+    if (cached) { setLeads(cached); setLoading(false); }
+    else setLoading(true);
     setSelected(new Set());
     try {
       const params = tab !== "all" ? `?tab=${tab}` : "";
       const { data } = await api.get<Lead[]>(`/campaigns/${selectedId}/leads${params}`);
-      // Client-side safety net: deduplicate by email
       const unique = Array.from(new Map(data.map((l) => [l.email.toLowerCase(), l])).values());
       setLeads(unique);
+      setCached(key, unique);
+    } catch {
+      // silently keep cached data if fetch fails
     } finally {
       setLoading(false);
     }
-    // Refresh counts (non-blocking)
     api.get<LeadCounts>(`/campaigns/${selectedId}/leads/counts`)
       .then((r) => setCounts(r.data))
       .catch(() => {});
@@ -68,11 +76,13 @@ export default function LeadsPage() {
   useEffect(() => {
     setActiveTab("all");
     setCounts(null);
+    setPage(1);
     load("all");
   }, [selectedId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function switchTab(tab: Tab) {
     setActiveTab(tab);
+    setPage(1);
     load(tab);
   }
 
@@ -80,9 +90,10 @@ export default function LeadsPage() {
     l.email.toLowerCase().includes(search.toLowerCase()) ||
     (l.source_blog || "").toLowerCase().includes(search.toLowerCase())
   );
+  const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   function toggleAll() {
-    setSelected(selected.size === filtered.length ? new Set() : new Set(filtered.map((l) => l.id)));
+    setSelected(selected.size === paginated.length ? new Set() : new Set(paginated.map((l) => l.id)));
   }
 
   function toggle(id: number) {
@@ -96,7 +107,7 @@ export default function LeadsPage() {
     try {
       await api.post("/leads/validate", { ids: Array.from(selected) });
       await load(activeTab);
-    } finally {
+    } catch { /* ignore */ } finally {
       setValidating(false);
     }
   }
@@ -107,7 +118,7 @@ export default function LeadsPage() {
     try {
       await api.post("/leads/bulk-delete", { ids: Array.from(selected) });
       await load(activeTab);
-    } finally {
+    } catch { /* ignore */ } finally {
       setDeleting(false);
     }
   }
@@ -194,7 +205,7 @@ export default function LeadsPage() {
                 <thead className="border-b border-gray-200 bg-gray-50">
                   <tr>
                     <th className="px-4 py-3 w-10">
-                      <input type="checkbox" checked={selected.size === filtered.length && filtered.length > 0} onChange={toggleAll} className="rounded" />
+                      <input type="checkbox" checked={paginated.length > 0 && selected.size === paginated.length} onChange={toggleAll} className="rounded" />
                     </th>
                     <th className="px-4 py-3 text-left font-medium text-gray-600">Email</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-600">Source Blog</th>
@@ -203,7 +214,7 @@ export default function LeadsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {filtered.map((l) => (
+                  {paginated.map((l) => (
                     <tr key={l.id} className="hover:bg-gray-50">
                       <td className="px-4 py-3">
                         <input type="checkbox" checked={selected.has(l.id)} onChange={() => toggle(l.id)} className="rounded" />
@@ -218,6 +229,11 @@ export default function LeadsPage() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+          {filtered.length > PAGE_SIZE && (
+            <div className="px-4 pb-3">
+              <Pagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} />
             </div>
           )}
         </CardContent>

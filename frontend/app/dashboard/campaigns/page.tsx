@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
+import { Pagination } from "@/components/ui/pagination";
+import { getCached, setCached } from "@/lib/cache";
 import {
   Plus, Trash2, Play, Square, Loader2, Globe, Users,
   Mail, CheckCheck, ChevronDown, ChevronUp, AlertCircle, StopCircle,
@@ -67,7 +69,7 @@ function PipelineBar({ stats, status }: { stats: CampaignStats | null; status: s
     if (stats.sources === 0) return "No blogs were found. Try a different niche or check your SerpAPI key.";
     if (stats.leads === 0) return "Blogs were found but no email addresses could be scraped. Many blogs hide emails behind contact forms — you may need to add leads manually.";
     if (stats.pending_outreach === 0 && stats.approved_outreach === 0 && stats.leads > 0)
-      return "Leads exist but no outreach was generated — Gemini may have failed. Re-run the pipeline.";
+      return `${stats.leads} lead${stats.leads !== 1 ? "s" : ""} found but no outreach written — go to Outreach and click Generate & Send All.`;
     if (stats.pending_outreach > 0) return `${stats.pending_outreach} draft${stats.pending_outreach !== 1 ? "s" : ""} ready to review in Outreach → approve them, then send via Bulk Send.`;
     return null;
   })();
@@ -118,37 +120,50 @@ export default function CampaignsPage() {
   const [stopRequestedIds, setStopRequestedIds] = useState<Set<number>>(new Set());
   const [statusOverrides, setStatusOverrides] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [statsMap, setStatsMap] = useState<Record<number, CampaignStats>>({});
+  const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
+  const [statsMap, setStatsMap] = useState<Record<number, CampaignStats>>(() => {
+    // Pre-populate from cache so stats are visible instantly on page load
+    const cached = getCached<Record<number, CampaignStats>>("campaign_stats_all");
+    return cached ?? {};
+  });
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 10;
   const [loadingStats, setLoadingStats] = useState<Record<number, boolean>>({});
+  const loadedRef = useRef<Set<number>>(new Set());
 
   async function loadStats(id: number) {
-    setLoadingStats((prev) => ({ ...prev, [id]: true }));
+    if (loadedRef.current.has(id)) return; // already in-flight or done
+    loadedRef.current.add(id);
+    // Show cached value immediately while the network request runs
+    const cached = getCached<CampaignStats>(`cstats_${id}`);
+    if (cached) setStatsMap((prev) => ({ ...prev, [id]: cached }));
+    else setLoadingStats((prev) => ({ ...prev, [id]: true }));
     try {
       const { data } = await api.get<CampaignStats>(`/campaigns/${id}/stats`);
-      setStatsMap((prev) => ({ ...prev, [id]: data }));
+      setStatsMap((prev) => {
+        const next = { ...prev, [id]: data };
+        setCached("campaign_stats_all", next);
+        return next;
+      });
+      setCached(`cstats_${id}`, data);
     } catch {
-      // ignore
+      loadedRef.current.delete(id); // allow retry
     } finally {
       setLoadingStats((prev) => ({ ...prev, [id]: false }));
     }
   }
 
-  function toggleExpand(id: number) {
-    if (expandedId === id) {
-      setExpandedId(null);
-    } else {
-      setExpandedId(id);
-      if (!statsMap[id]) loadStats(id);
-    }
+  function toggleCollapse(id: number) {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
   }
 
   // Sync overrides and stop-set when real status arrives from server
   useEffect(() => {
     campaigns.forEach((c) => {
-      if ((c.status === "completed" || c.status === "error") && !statsMap[c.id]) {
-        loadStats(c.id);
-      }
       // Clear override once the server confirms the status settled
       setStatusOverrides((prev) => {
         if (!(c.id in prev)) return prev;
@@ -164,6 +179,8 @@ export default function CampaignsPage() {
         });
       }
     });
+    // Batch-load stats for every campaign that doesn't have them yet
+    campaigns.forEach((c) => { if (!statsMap[c.id]) loadStats(c.id); });
   }, [campaigns]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleCreate(e: React.FormEvent) {
@@ -187,6 +204,7 @@ export default function CampaignsPage() {
     setStatusOverrides((prev) => ({ ...prev, [id]: "running" }));
     setError(null);
     setStatsMap((prev) => { const n = { ...prev }; delete n[id]; return n; });
+    loadedRef.current.delete(id);
     try {
       await api.post(`/campaigns/${id}/run`);
       await refresh();
@@ -292,7 +310,7 @@ export default function CampaignsPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {campaigns.map((c, i) => {
+          {campaigns.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((c, i) => {
             const displayStatus = statusOverrides[c.id] ?? c.status;
             const isRunning = displayStatus === "running";
             return (
@@ -330,12 +348,12 @@ export default function CampaignsPage() {
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() => toggleExpand(c.id)}
-                        title="Show pipeline stats"
+                        onClick={() => toggleCollapse(c.id)}
+                        title={collapsedIds.has(c.id) ? "Show pipeline stats" : "Hide pipeline stats"}
                       >
-                        {expandedId === c.id
-                          ? <ChevronUp className="h-4 w-4 text-gray-500" />
-                          : <ChevronDown className="h-4 w-4 text-gray-500" />}
+                        {collapsedIds.has(c.id)
+                          ? <ChevronDown className="h-4 w-4 text-gray-500" />
+                          : <ChevronUp className="h-4 w-4 text-gray-500" />}
                       </Button>
                       <Button size="sm" variant="ghost" onClick={() => handleDelete(c.id)}>
                         <Trash2 className="h-3 w-3 text-red-500" />
@@ -343,23 +361,16 @@ export default function CampaignsPage() {
                     </div>
                   </div>
 
-                  {/* Pipeline stats panel */}
-                  {expandedId === c.id && (
+                  {/* Pipeline stats — always visible unless manually collapsed */}
+                  {!collapsedIds.has(c.id) && (
                     <div className="mt-3 border-t border-gray-100 pt-3">
-                      {loadingStats[c.id] ? (
+                      {loadingStats[c.id] && !statsMap[c.id] ? (
                         <div className="flex items-center gap-2 text-sm text-gray-400 py-2">
                           <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading pipeline stats…
                         </div>
-                      ) : (
-                        <PipelineBar stats={statsMap[c.id] ?? null} status={displayStatus} />
-                      )}
-                    </div>
-                  )}
-
-                  {/* Auto-show diagnosis for completed/error without needing expand */}
-                  {expandedId !== c.id && (displayStatus === "completed" || displayStatus === "error") && statsMap[c.id] && (
-                    <div className="mt-3 border-t border-gray-100 pt-3">
-                      <PipelineBar stats={statsMap[c.id]} status={displayStatus} />
+                      ) : statsMap[c.id] ? (
+                        <PipelineBar stats={statsMap[c.id]} status={displayStatus} />
+                      ) : null}
                     </div>
                   )}
                 </CardContent>
@@ -367,6 +378,7 @@ export default function CampaignsPage() {
             </motion.div>
             );
           })}
+          <Pagination page={page} pageSize={PAGE_SIZE} total={campaigns.length} onChange={setPage} />
         </div>
       )}
     </div>

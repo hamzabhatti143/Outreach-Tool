@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  useEffect, useState, useCallback, useRef,
+  useEffect, useState, useCallback, useRef, useMemo,
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -11,6 +11,8 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Pagination } from "@/components/ui/pagination";
+import { getCached, setCached } from "@/lib/cache";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import api from "@/lib/api";
@@ -143,6 +145,8 @@ export default function RepliesPage() {
   // Filters
   const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all");
   const [sortOrder, setSortOrder] = useState<"high-to-low" | "low-to-high">("high-to-low");
+  const [listPage, setListPage] = useState(1);
+  const LIST_PAGE_SIZE = 20;
 
   // AI reply draft state
   const [draftSubject, setDraftSubject] = useState("");
@@ -169,11 +173,14 @@ export default function RepliesPage() {
   // ── Data loading ────────────────────────────────────────────────────────────
 
   const load = useCallback(async () => {
-    setLoading(true);
+    const cached = getCached<ReplyItem[]>("replies");
+    if (cached) { setReplies(cached); setLoading(false); }
+    else setLoading(true);
     setError(null);
     try {
       const { data } = await api.get<ReplyItem[]>("/replies");
       setReplies(data);
+      setCached("replies", data);
       setOpen((prev) => (prev ? (data.find((r) => r.id === prev.id) ?? null) : null));
     } catch {
       setError("Failed to load replies. Please refresh.");
@@ -309,9 +316,14 @@ export default function RepliesPage() {
       return sortOrder === "high-to-low" ? rb - ra : ra - rb;
     });
 
+  const pagedReplies = useMemo(
+    () => filtered.slice((listPage - 1) * LIST_PAGE_SIZE, listPage * LIST_PAGE_SIZE),
+    [filtered, listPage]
+  );
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  if (loading && replies.length === 0) {
+  if (loading && replies.length === 0 && !getCached<ReplyItem[]>("replies")) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-3">
         <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
@@ -357,7 +369,7 @@ export default function RepliesPage() {
           {(["all", "positive", "neutral", "negative"] as const).map((tab) => (
             <button
               key={tab}
-              onClick={() => setSentimentFilter(tab)}
+              onClick={() => { setSentimentFilter(tab); setListPage(1); }}
               className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors capitalize ${
                 sentimentFilter === tab ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
               }`}
@@ -393,7 +405,8 @@ export default function RepliesPage() {
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto flex flex-col">
+            <div className="flex-1">
             {filtered.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-gray-400 py-16">
                 <InboxIcon className="h-10 w-10 mb-3 opacity-30" />
@@ -401,7 +414,7 @@ export default function RepliesPage() {
                 <p className="text-xs mt-1 text-center px-4">Click "Check Inbox" above to poll your Gmail for new replies</p>
               </div>
             ) : (
-              filtered.map((reply) => (
+              pagedReplies.map((reply) => (
                 <div
                   key={reply.id}
                   onClick={() => openReply(reply)}
@@ -439,6 +452,12 @@ export default function RepliesPage() {
                   </div>
                 </div>
               ))
+            )}
+            </div>
+            {filtered.length > LIST_PAGE_SIZE && (
+              <div className="px-3 py-2 border-t border-gray-100 shrink-0">
+                <Pagination page={listPage} pageSize={LIST_PAGE_SIZE} total={filtered.length} onChange={setListPage} />
+              </div>
             )}
           </div>
         </div>

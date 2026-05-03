@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   Loader2, Send, Trash2, CheckSquare, Square,
   RefreshCw, AlertCircle, CheckCircle,
 } from "lucide-react";
+import { Pagination } from "@/components/ui/pagination";
+import { getCached, setCached } from "@/lib/cache";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
@@ -30,17 +32,24 @@ export default function BulkPage() {
   const [progress, setProgress] = useState<{ sent: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 20;
 
   const load = useCallback(async () => {
-    setLoading(true);
+    const key = `bulk_${selectedId ?? "all"}`;
+    const cached = getCached<OutreachEmail[]>(key);
+    if (cached) { setEmails(cached); setLoading(false); }
+    else setLoading(true);
     setError(null);
     setSelected(new Set());
+    setPage(1);
     try {
       const url = selectedId
         ? `/outreach/approved?campaign_id=${selectedId}`
         : "/outreach/approved";
       const { data } = await api.get<OutreachEmail[]>(url);
       setEmails(data);
+      setCached(key, data);
     } catch {
       setError("Failed to load emails.");
     } finally {
@@ -50,8 +59,18 @@ export default function BulkPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  const pagedEmails = useMemo(
+    () => emails.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [emails, page]
+  );
+
   function toggleAll() {
-    setSelected(selected.size === emails.length ? new Set() : new Set(emails.map((e) => e.id)));
+    const pageIds = pagedEmails.map((e) => e.id);
+    const allSelected = pageIds.every((id) => selected.has(id));
+    const next = new Set(selected);
+    if (allSelected) pageIds.forEach((id) => next.delete(id));
+    else pageIds.forEach((id) => next.add(id));
+    setSelected(next);
   }
 
   function toggle(id: number) {
@@ -170,7 +189,7 @@ export default function BulkPage() {
             disabled={emails.length === 0}
             className="text-gray-500 hover:text-indigo-600 transition-colors disabled:opacity-30"
           >
-            {selected.size > 0 && selected.size === emails.length
+            {pagedEmails.length > 0 && pagedEmails.every((e) => selected.has(e.id))
               ? <CheckSquare className="h-5 w-5 text-indigo-600" />
               : <Square className="h-5 w-5" />}
           </button>
@@ -207,7 +226,7 @@ export default function BulkPage() {
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm">
-          {emails.map((email) => (
+          {pagedEmails.map((email) => (
             <div
               key={email.id}
               onClick={() => toggle(email.id)}
@@ -232,6 +251,11 @@ export default function BulkPage() {
               <Badge variant="success" className="shrink-0 text-xs">Approved</Badge>
             </div>
           ))}
+          {emails.length > PAGE_SIZE && (
+            <div className="px-4 py-3 border-t border-gray-100">
+              <Pagination page={page} pageSize={PAGE_SIZE} total={emails.length} onChange={setPage} />
+            </div>
+          )}
         </div>
       )}
     </div>

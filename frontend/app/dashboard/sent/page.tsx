@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Eye, RefreshCw, Loader2, ChevronDown, ChevronRight, BarChart2 } from "lucide-react";
+import { Pagination } from "@/components/ui/pagination";
+import { getCached, setCached } from "@/lib/cache";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
@@ -116,13 +118,22 @@ export default function SentPage() {
   const [search, setSearch] = useState("");
   const [retryingId, setRetryingId] = useState<number | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
 
   const load = useCallback(async () => {
-    setLoading(true);
+    const key = `sent_${statusFilter}`;
+    const cached = getCached<SentLog[]>(key);
+    if (cached) { setLogs(cached); setLoading(false); }
+    else setLoading(true);
+    setPage(1);
     try {
       const params = statusFilter ? `?status_filter=${statusFilter}` : "";
       const { data } = await api.get<SentLog[]>(`/sent${params}`);
       setLogs(data);
+      setCached(key, data);
+    } catch {
+      // keep cached data on network failure
     } finally {
       setLoading(false);
     }
@@ -135,7 +146,7 @@ export default function SentPage() {
     try {
       await api.post(`/sent/${logId}/retry`);
       await load();
-    } finally {
+    } catch { /* ignore */ } finally {
       setRetryingId(null);
     }
   }
@@ -154,7 +165,8 @@ export default function SentPage() {
       l.subject.toLowerCase().includes(search.toLowerCase())
   );
 
-  const groups = groupByDate(filtered);
+  const paginatedLogs = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const groups = groupByDate(paginatedLogs);
 
   // Summary stats
   const totalSent = logs.filter((l) => l.status === "sent").length;
@@ -287,6 +299,9 @@ export default function SentPage() {
               </Card>
             );
           })}
+          {filtered.length > PAGE_SIZE && (
+            <Pagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} />
+          )}
         </div>
       )}
     </div>

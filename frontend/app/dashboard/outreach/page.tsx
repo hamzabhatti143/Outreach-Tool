@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Loader2, Check, X, Edit2, Save, CheckCheck,
@@ -12,6 +12,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
+import { Pagination } from "@/components/ui/pagination";
+import { getCached, setCached } from "@/lib/cache";
 import { useCampaigns } from "@/lib/campaign-context";
 import api from "@/lib/api";
 
@@ -76,10 +78,13 @@ export default function OutreachPage() {
   const [sendProgress, setSendProgress] = useState<SendProgress | null>(null);
   const [showSendConfirm, setShowSendConfirm] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoGenRef = useRef<Set<string>>(new Set());
 
   const [editing, setEditing] = useState(false);
   const [editSubject, setEditSubject] = useState("");
   const [editBody, setEditBody] = useState("");
+  const [listPage, setListPage] = useState(1);
+  const LIST_PAGE_SIZE = 20;
   const bodyRef = useRef<HTMLTextAreaElement>(null);
 
   const selectedCampaign = campaigns.find((c) => c.id === selectedId) ?? null;
@@ -99,18 +104,23 @@ export default function OutreachPage() {
   }, [open, editing]);
 
   const load = useCallback(async (cid: number, filter?: string) => {
-    setLoading(true);
     setError(null);
+    setListPage(1);
     const activeFilter = filter ?? statusFilter;
+    const key = `outreach_${cid}_${activeFilter}`;
+    const cached = getCached<OutreachEmail[]>(key);
+    if (cached) { setEmails(cached); setLoading(false); }
+    else setLoading(true);
     try {
       const params = new URLSearchParams({ campaign_id: String(cid) });
       if (activeFilter !== "all") params.set("status", activeFilter);
       const { data } = await api.get<OutreachEmail[]>(`/outreach/all?${params}`);
       setEmails(data);
+      setCached(key, data);
       setOpen((prev) => prev ? (data.find((e) => e.id === prev.id) ?? null) : null);
     } catch {
       setError("Failed to load emails.");
-      setEmails([]);
+      if (!cached) setEmails([]);
     } finally {
       setLoading(false);
     }
@@ -125,6 +135,31 @@ export default function OutreachPage() {
     if (!selectedId) { setEmails([]); setStats(null); setLoading(false); return; }
     load(selectedId);
   }, [selectedId, campaignsLoading, load]);
+
+  // Auto-generate drafts whenever new leads arrive without outreach emails.
+  // Key = campaignId + leadsCount so it re-fires if the pipeline finds more leads.
+  useEffect(() => {
+    if (!stats || !selectedId) return;
+    if (stats.leads === 0) return;
+    const key = `${selectedId}-${stats.leads}`;
+    if (autoGenRef.current.has(key)) return;
+    autoGenRef.current.add(key);
+
+    (async () => {
+      setGenerating(true);
+      try {
+        const { data } = await api.post<{ generated: number; total_leads: number }>(
+          `/outreach/generate?campaign_id=${selectedId}`
+        );
+        if (data.generated > 0) {
+          showSuccess(`Auto-generated ${data.generated} draft${data.generated !== 1 ? "s" : ""} for new leads`);
+          setStatusFilter("pending");
+          load(selectedId, "pending");
+        }
+      } catch { /* silent — user can still click Generate manually */ }
+      finally { setGenerating(false); }
+    })();
+  }, [selectedId, stats?.leads]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Stop progress polling when send job completes
   useEffect(() => {
@@ -218,6 +253,48 @@ export default function OutreachPage() {
     }
   }
 
+  async function handleGenerateAndSend() {
+    if (!selectedId) return;
+    setGenerating(true);
+    setGenerateResult(null);
+    setError(null);
+    try {
+      // Step 1: Write outreach for leads that don't have it yet
+      const { data: gen } = await api.post<{ generated: number; total_leads: number }>(
+        `/outreach/generate?campaign_id=${selectedId}`
+      );
+      if (gen.generated === 0) {
+        setGenerateResult({
+          msg: `No new leads to process — all ${gen.total_leads} already have outreach emails.`,
+          ok: false,
+        });
+        return;
+      }
+      setGenerateResult({ msg: `Generated ${gen.generated} draft${gen.generated !== 1 ? "s" : ""} — approving & sending…`, ok: true });
+
+      // Step 2: Approve all pending
+      await api.post("/outreach/approve-all", { campaign_id: selectedId });
+
+      // Step 3: Kick off background send + start polling
+      setGenerating(false);
+      setSendingAll(true);
+      setSendProgress(null);
+      await api.post("/outreach/send-all-approved", { campaign_id: selectedId });
+      if (selectedId) await load(selectedId, "approved");
+      pollRef.current = setInterval(async () => {
+        try {
+          const { data } = await api.get<SendProgress>("/outreach/send-progress");
+          setSendProgress(data);
+        } catch { /* ignore */ }
+      }, 2000);
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg || "Failed to generate and send.");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   function openEmail(email: OutreachEmail) {
     setOpen(email);
     setEditing(false);
@@ -239,7 +316,12 @@ export default function OutreachPage() {
   }
 
   function toggleAll() {
-    setSelected(selected.size === emails.length ? new Set() : new Set(emails.map((e) => e.id)));
+    const pageIds = pagedEmails.map((e) => e.id);
+    const allPageSelected = pageIds.every((id) => selected.has(id));
+    const next = new Set(selected);
+    if (allPageSelected) pageIds.forEach((id) => next.delete(id));
+    else pageIds.forEach((id) => next.add(id));
+    setSelected(next);
   }
 
   async function approveSelected() {
@@ -305,6 +387,11 @@ export default function OutreachPage() {
     return <Badge variant="secondary">Pending</Badge>;
   };
 
+  const pagedEmails = useMemo(
+    () => emails.slice((listPage - 1) * LIST_PAGE_SIZE, listPage * LIST_PAGE_SIZE),
+    [emails, listPage]
+  );
+
   const pendingCount = emails.filter((e) => e.status === "pending").length;
   const approvedCount = stats?.approved_outreach ?? 0;
 
@@ -317,7 +404,7 @@ export default function OutreachPage() {
         </div>
       );
     }
-    if (selectedCampaign.status === "idle") {
+    if (selectedCampaign.status === "idle" && (!stats || stats.leads === 0)) {
       return (
         <div className="flex flex-col items-center justify-center h-full py-20 text-center px-6">
           <Play className="h-10 w-10 mb-3 text-gray-300" />
@@ -386,14 +473,38 @@ export default function OutreachPage() {
         </div>
       );
     }
+    if (stats && stats.leads > 0) {
+      // Leads exist but no outreach written — offer one-click generate + send
+      return (
+        <div className="flex flex-col items-center justify-center h-full py-16 text-center px-6 gap-4">
+          <div className="h-14 w-14 rounded-full bg-indigo-50 flex items-center justify-center">
+            <Sparkles className="h-7 w-7 text-indigo-500" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-gray-800">
+              {stats.leads} lead{stats.leads !== 1 ? "s" : ""} ready — no outreach written yet
+            </p>
+            <p className="text-xs text-gray-400 mt-1 max-w-xs mx-auto">
+              Write emails for all leads and send them automatically, or generate drafts first to review.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 w-full max-w-[200px]">
+            <Button onClick={handleGenerateAndSend} loading={generating} className="w-full">
+              <Send className="h-3.5 w-3.5 mr-1.5" /> Generate &amp; Send All
+            </Button>
+            <Button size="sm" variant="outline" onClick={handleGenerate} loading={generating} className="w-full">
+              <Sparkles className="h-3.5 w-3.5 mr-1" /> Generate Drafts Only
+            </Button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center h-full py-20 text-center px-6">
         <Sparkles className="h-10 w-10 mb-3 text-indigo-300" />
         <p className="text-sm font-semibold text-gray-700">No drafts yet</p>
         <p className="text-xs mt-1 text-gray-400 max-w-xs mb-4">
-          {stats && stats.leads > 0
-            ? `${stats.leads} lead${stats.leads !== 1 ? "s" : ""} found — click Generate Drafts.`
-            : "Run Generate Drafts to create outreach emails for this campaign."}
+          Run Generate Drafts to create outreach emails for this campaign.
         </p>
         <Button size="sm" onClick={handleGenerate} loading={generating}>
           <Sparkles className="h-3.5 w-3.5 mr-1" /> Generate Drafts
@@ -614,7 +725,7 @@ export default function OutreachPage() {
             <div className="flex items-center gap-2 px-4 py-2">
               <input
                 type="checkbox"
-                checked={emails.length > 0 && selected.size === emails.length}
+                checked={pagedEmails.length > 0 && pagedEmails.every((e) => selected.has(e.id))}
                 onChange={toggleAll}
                 className="rounded border-gray-300 text-indigo-600"
                 disabled={emails.length === 0}
@@ -631,7 +742,8 @@ export default function OutreachPage() {
           </div>
 
           {/* List body */}
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto flex flex-col">
+            <div className="flex-1">
             {loading ? (
               <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-400">
                 <Loader2 className="h-7 w-7 animate-spin text-indigo-400" />
@@ -640,7 +752,7 @@ export default function OutreachPage() {
             ) : emails.length === 0 ? (
               <ListEmpty />
             ) : (
-              emails.map((email) => (
+              pagedEmails.map((email) => (
                 <div
                   key={email.id}
                   onClick={() => openEmail(email)}
@@ -668,6 +780,12 @@ export default function OutreachPage() {
                   </div>
                 </div>
               ))
+            )}
+            </div>
+            {emails.length > LIST_PAGE_SIZE && (
+              <div className="px-3 py-2 border-t border-gray-100 shrink-0">
+                <Pagination page={listPage} pageSize={LIST_PAGE_SIZE} total={emails.length} onChange={setListPage} />
+              </div>
             )}
           </div>
         </div>
