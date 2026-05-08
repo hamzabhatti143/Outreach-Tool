@@ -259,7 +259,10 @@ async def campaign_stats(
         select(func.count(BlogSource.id)).where(BlogSource.campaign_id == campaign_id)
     )
     leads_res = await db.execute(
-        select(func.count(Lead.id)).where(Lead.campaign_id == campaign_id)
+        select(func.count(Lead.id)).where(
+            Lead.campaign_id == campaign_id,
+            Lead.is_duplicate.is_(False),
+        )
     )
     pending_res = await db.execute(
         select(func.count(OutreachEmail.id)).where(
