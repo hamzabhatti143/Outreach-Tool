@@ -2,12 +2,12 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from db.database import init_db
-from routers import auth, campaigns, sources, leads, outreach, bulk, sent, tracking, settings, replies
+from routers import auth, campaigns, sources, leads, outreach, bulk, sent, tracking, settings, replies, template
 from routers import gmail
 
 logging.basicConfig(level=logging.INFO)
@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 async def _check_and_reset_quota() -> None:
     """
-    Check if SerpAPI quota was exceeded and 12 hours have passed.
-    If yes: clear the quota flag and re-trigger research for all quota_paused campaigns.
+    Check if the search quota flag was set and 12 hours have passed.
+    If yes: clear the flag and re-trigger research for all quota_paused campaigns.
     """
     from db.database import AsyncSessionLocal
     from db.models import AppSettings, Campaign, CampaignStatus
@@ -36,7 +36,7 @@ async def _check_and_reset_quota() -> None:
         except Exception:
             return
 
-        if datetime.utcnow() - exceeded_at < timedelta(hours=12):
+        if datetime.now(timezone.utc).replace(tzinfo=None) - exceeded_at < timedelta(hours=12):
             return
 
         # 12 hours have passed — clear the flag
@@ -71,7 +71,7 @@ async def _resume_research_for_campaign(campaign_id: int, niche: str, user_id: i
 
 
 async def _quota_reset_loop() -> None:
-    """Background loop: every 30 minutes, check if SerpAPI quota has reset."""
+    """Background loop: every 30 minutes, check if quota_paused campaigns can resume."""
     while True:
         await asyncio.sleep(1800)  # 30 minutes
         try:
@@ -127,6 +127,7 @@ app.include_router(sent.router)
 app.include_router(tracking.router)
 app.include_router(settings.router)
 app.include_router(replies.router)
+app.include_router(template.router)
 
 
 @app.get("/health")

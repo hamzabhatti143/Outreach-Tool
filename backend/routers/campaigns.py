@@ -12,7 +12,7 @@ from pipeline.scraper_agent import run_scraper_agent
 from pipeline.writer_agent import run_writer_agent
 from tools.validator import validate_email
 from tools.search import QuotaExceededException
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -181,22 +181,6 @@ async def _run_pipeline(campaign_id: int, niche: str, user_id: int | None = None
         if campaign_id in _stop_requested:
             break
 
-        # ── Step 3.5: Auto-send new drafts ───────────────────────────────────
-        try:
-            from pipeline.sender_agent import auto_send_campaign
-            summary = await auto_send_campaign(
-                campaign_id,
-                is_stopped=lambda: campaign_id in _stop_requested,
-            )
-            if summary["sent"] or summary["failed"]:
-                logger.info("[pipeline] Campaign %d: auto-sent %d, failed %d",
-                            campaign_id, summary["sent"], summary["failed"])
-        except Exception as exc:
-            logger.error("[pipeline] Campaign %d auto-send error: %s", campaign_id, exc)
-
-        if campaign_id in _stop_requested:
-            break
-
         # ── Step 4: Validate unverified leads ────────────────────────────────
         try:
             async with retry_session() as db:
@@ -212,7 +196,7 @@ async def _run_pipeline(campaign_id: int, niche: str, user_id: int | None = None
                         try:
                             v = await validate_email(lead.email)
                             lead.validity_status = ValidityStatus(v["status"])
-                            lead.validated_at = datetime.utcnow()
+                            lead.validated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                         except Exception:
                             pass
                     await asyncio.gather(*[_validate(lead) for lead in unverified])

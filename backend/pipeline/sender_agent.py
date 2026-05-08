@@ -1,9 +1,9 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update as sa_update, delete as sa_delete
+from sqlalchemy import select, update as sa_update
 from db.models import OutreachEmail, OutreachStatus
 from tools.mailer import send_email
 
@@ -19,7 +19,6 @@ async def run_sender_agent(
     """
     Send a list of outreach emails. Dedup is enforced atomically inside send_email —
     duplicate calls for the same ID are safe and simply return "skipped".
-    Deletes each row after successful send so it disappears from the outreach list.
     Returns summary of sent/skipped/failed counts.
     """
     sent = 0
@@ -47,13 +46,16 @@ async def run_sender_agent(
             failed += 1
             continue
 
-        send_result = await send_email(email_id, db)
+        try:
+            send_result = await send_email(email_id, db)
+        except Exception as exc:
+            logger.error("[run_sender] email_id=%d unexpected error: %s", email_id, exc)
+            failed += 1
+            errors.append({"id": email_id, "error": str(exc)})
+            continue
 
         if send_result["status"] in ("sent", "skipped"):
             sent += 1
-            # Remove from outreach list after sending
-            await db.execute(sa_delete(OutreachEmail).where(OutreachEmail.id == email_id))
-            await db.commit()
         else:
             failed += 1
             errors.append({"id": email_id, "error": send_result.get("error")})
@@ -68,7 +70,6 @@ async def auto_send_campaign(
     """
     Auto-approve all pending emails for a campaign then send them with rate-limit delay.
     Called by the pipeline so emails send themselves without user interaction.
-    Deletes each row after successful send.
     Respects the pipeline stop signal between sends.
     """
     from db.database import retry_session
@@ -81,7 +82,7 @@ async def auto_send_campaign(
                 OutreachEmail.campaign_id == campaign_id,
                 OutreachEmail.status == OutreachStatus.pending,
             )
-            .values(status=OutreachStatus.approved, approved_at=datetime.utcnow())
+            .values(status=OutreachStatus.approved, approved_at=datetime.now(timezone.utc).replace(tzinfo=None))
         )
         await db.commit()
 
@@ -110,9 +111,6 @@ async def auto_send_campaign(
                 result = await send_email(email_id, db)
                 if result["status"] in ("sent", "skipped"):
                     sent += 1
-                    # Remove from outreach list after sending
-                    await db.execute(sa_delete(OutreachEmail).where(OutreachEmail.id == email_id))
-                    await db.commit()
                 else:
                     failed += 1
                     logger.warning("[auto_send] email %d failed: %s", email_id, result.get("error"))

@@ -66,7 +66,7 @@ function PipelineBar({ stats, status }: { stats: CampaignStats | null; status: s
   const diagnosis = (() => {
     if (status === "running") return null;
     if (status === "error") return "Pipeline hit an error — check backend logs, then re-run.";
-    if (stats.sources === 0) return "No blogs were found. Try a different niche or check your SerpAPI key.";
+    if (stats.sources === 0) return "No blogs were found. Try a different niche.";
     if (stats.leads === 0) return "Blogs were found but no email addresses could be scraped. Many blogs hide emails behind contact forms — you may need to add leads manually.";
     if (stats.pending_outreach === 0 && stats.approved_outreach === 0 && stats.leads > 0)
       return `${stats.leads} lead${stats.leads !== 1 ? "s" : ""} found but no outreach written — go to Outreach and click Generate & Send All.`;
@@ -132,7 +132,7 @@ export default function CampaignsPage() {
   const loadedRef = useRef<Set<number>>(new Set());
 
   async function loadStats(id: number) {
-    if (loadedRef.current.has(id)) return; // already in-flight or done
+    if (loadedRef.current.has(id)) return; // in-flight guard only
     loadedRef.current.add(id);
     // Show cached value immediately while the network request runs
     const cached = getCached<CampaignStats>(`cstats_${id}`);
@@ -147,8 +147,9 @@ export default function CampaignsPage() {
       });
       setCached(`cstats_${id}`, data);
     } catch {
-      loadedRef.current.delete(id); // allow retry
+      // silent — will retry on next poll
     } finally {
+      loadedRef.current.delete(id); // always release so future calls can fetch
       setLoadingStats((prev) => ({ ...prev, [id]: false }));
     }
   }
@@ -183,6 +184,19 @@ export default function CampaignsPage() {
     campaigns.forEach((c) => { if (!statsMap[c.id]) loadStats(c.id); });
   }, [campaigns]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Poll stats + campaign list every 5s while any campaign is running
+  useEffect(() => {
+    const runningIds = campaigns
+      .filter((c) => (statusOverrides[c.id] ?? c.status) === "running")
+      .map((c) => c.id);
+    if (runningIds.length === 0) return;
+    const interval = setInterval(() => {
+      refresh();
+      runningIds.forEach((id) => loadStats(id));
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [campaigns, statusOverrides]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || !niche.trim()) return;
@@ -203,7 +217,6 @@ export default function CampaignsPage() {
     setRunningId(id);
     setStatusOverrides((prev) => ({ ...prev, [id]: "running" }));
     setError(null);
-    setStatsMap((prev) => { const n = { ...prev }; delete n[id]; return n; });
     loadedRef.current.delete(id);
     try {
       await api.post(`/campaigns/${id}/run`);

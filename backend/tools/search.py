@@ -1,31 +1,31 @@
 import asyncio
-import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from functools import partial
+from urllib.parse import urlparse
 
-import serpapi
+from ddgs import DDGS
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from db.models import SearchQuery, BlogSource, Campaign, CampaignStatus, AppSettings
+from db.models import SearchQuery, BlogSource, Campaign, AppSettings
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
-
 SKIP_DOMAINS = [
     "facebook.com", "twitter.com", "linkedin.com", "youtube.com",
     "instagram.com", "reddit.com", "pinterest.com", "tiktok.com",
+    "amazon.com", "wikipedia.org", "quora.com", "medium.com",
 ]
 
-# How many NEW blogs to find per call; SerpAPI returns 10 per page
 BLOGS_PER_ROUND = 30
+_MAX_PER_DOMAIN = 2   # max URLs from the same root domain per round
+_DDG_MAX_RESULTS = 40  # results requested from DDG per query
 
 _QUERIES = [
     "{niche} blog write for us",
@@ -38,29 +38,39 @@ _QUERIES = [
 
 
 class QuotaExceededException(Exception):
-    """Raised when SerpAPI reports the account has run out of searches."""
+    """Kept for interface compatibility — DDG has no quota."""
+
+
+def _root_domain(url: str) -> str:
+    try:
+        host = urlparse(url).hostname or ""
+        parts = host.split(".")
+        return ".".join(parts[-2:]) if len(parts) >= 2 else host
+    except Exception:
+        return url
 
 
 async def _upsert_setting(key: str, value: str, db: AsyncSession) -> None:
     stmt = pg_insert(AppSettings).values(
         key=key,
         value=value,
-        updated_at=datetime.utcnow(),
+        updated_at=datetime.now(timezone.utc),
     ).on_conflict_do_update(
         index_elements=["key"],
-        set_={"value": value, "updated_at": datetime.utcnow()},
+        set_={"value": value, "updated_at": datetime.now(timezone.utc)},
     )
     await db.execute(stmt)
     await db.commit()
 
 
-async def _handle_quota_exceeded(campaign_id: int, db: AsyncSession) -> None:
-    logger.warning("[search] SerpAPI quota exceeded for campaign %d", campaign_id)
-    await _upsert_setting("quota_exceeded_at", datetime.utcnow().isoformat(), db)
-    campaign = await db.get(Campaign, campaign_id)
-    if campaign:
-        campaign.status = CampaignStatus.quota_paused
-        await db.commit()
+def _ddg_search(query: str, max_results: int) -> list[dict]:
+    """Synchronous DDGS text search — called via run_in_executor."""
+    try:
+        with DDGS() as ddgs:
+            return list(ddgs.text(query, max_results=max_results))
+    except Exception as exc:
+        logger.warning("[search] DDGS error: %s", exc)
+        return []
 
 
 async def search_blogs(
@@ -70,24 +80,25 @@ async def search_blogs(
     user_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Search SerpAPI for blogs in a niche.
-    Resumes from the campaign's saved pagination state.
+    Search DuckDuckGo for blogs in a niche.
+    Rotates through _QUERIES, advancing to the next query each round.
+    Resets query index when all queries are exhausted so the next call starts fresh.
     Returns up to BLOGS_PER_ROUND newly discovered blog sources.
-    Resets pagination when all queries are exhausted so the next call starts fresh.
     """
     campaign = await db.get(Campaign, campaign_id)
     if not campaign:
         return []
 
     query_idx: int = campaign.last_search_query_index or 0
-    page_num: int = campaign.last_search_page or 0
     total_fetched: int = campaign.total_blogs_fetched or 0
 
-    # Load all known URLs for this campaign for in-memory dedup
+    # Load known URLs for this campaign for in-memory dedup
     existing_result = await db.execute(
         select(BlogSource.url).where(BlogSource.campaign_id == campaign_id)
     )
     seen_urls: set[str] = {row[0] for row in existing_result.all()}
+    # Track per-domain counts within this round to avoid one site eating all slots
+    domain_counts: dict[str, int] = {}
 
     queries = [q.format(niche=niche) for q in _QUERIES]
     all_sources: list[dict[str, Any]] = []
@@ -95,47 +106,26 @@ async def search_blogs(
 
     while query_idx < len(queries) and slots_left > 0:
         query_string = queries[query_idx]
-        start_offset = page_num * 10
 
         query_record = SearchQuery(
             campaign_id=campaign_id,
             query_string=query_string,
-            page_offset=start_offset,
+            page_offset=0,
         )
         db.add(query_record)
         await db.flush()
 
-        try:
-            client = serpapi.Client(api_key=SERPAPI_KEY)
-            loop = asyncio.get_event_loop()
-            results = await loop.run_in_executor(
-                None,
-                partial(client.search, q=query_string, engine="google", num=10, start=start_offset),
-            )
-            organic = results.get("organic_results", [])
-        except Exception as e:
-            error_str = str(e).lower()
-            if "run out of searches" in error_str or "quota" in error_str or "credits" in error_str:
-                await _handle_quota_exceeded(campaign_id, db)
-                raise QuotaExceededException(str(e))
-            logger.error("[search] SerpAPI error for '%s' page %d: %s", query_string, page_num, e)
-            # Treat as empty page and advance
-            organic = []
+        loop = asyncio.get_event_loop()
+        raw_results: list[dict] = await loop.run_in_executor(
+            None,
+            partial(_ddg_search, query_string, _DDG_MAX_RESULTS),
+        )
 
-        if not organic:
-            # This query has no more results — move to the next query
-            query_idx += 1
-            page_num = 0
-            campaign.last_search_query_index = query_idx
-            campaign.last_search_page = page_num
-            await db.commit()
-            continue
-
-        for result in organic:
+        for result in raw_results:
             if slots_left <= 0:
                 break
 
-            url: str = result.get("link", "")
+            url: str = result.get("href", "")
             blog_name: str = result.get("title", url)
 
             if not url or url in seen_urls:
@@ -143,7 +133,12 @@ async def search_blogs(
             if any(d in url for d in SKIP_DOMAINS):
                 continue
 
+            domain = _root_domain(url)
+            if domain_counts.get(domain, 0) >= _MAX_PER_DOMAIN:
+                continue
+
             seen_urls.add(url)
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
 
             stmt = pg_insert(BlogSource).values(
                 campaign_id=campaign_id,
@@ -154,7 +149,6 @@ async def search_blogs(
             await db.execute(stmt)
             await db.flush()
 
-            # Fetch the row ID (may have been inserted just now, or already existed)
             id_res = await db.execute(
                 select(BlogSource.id).where(
                     BlogSource.campaign_id == campaign_id,
@@ -167,21 +161,25 @@ async def search_blogs(
                 slots_left -= 1
                 total_fetched += 1
 
-        # Advance to next page of this query
-        page_num += 1
-        campaign.last_search_page = page_num
+        # Advance to next query; DDG doesn't support page offsets
+        query_idx += 1
         campaign.last_search_query_index = query_idx
+        campaign.last_search_page = 0
         campaign.total_blogs_fetched = total_fetched
         await db.commit()
 
-    # All queries exhausted → reset pagination so next call starts fresh
+        # Small delay between queries to avoid DDG rate limiting
+        if query_idx < len(queries) and slots_left > 0:
+            await asyncio.sleep(2)
+
+    # All queries exhausted → reset for next round
     if query_idx >= len(queries):
         campaign.last_search_query_index = 0
         campaign.last_search_page = 0
         campaign.total_blogs_fetched = total_fetched
         await db.commit()
         logger.info(
-            "[search] Campaign %d: all %d queries exhausted — pagination reset for next round",
+            "[search] Campaign %d: all %d queries exhausted — index reset for next round",
             campaign_id, len(queries),
         )
 

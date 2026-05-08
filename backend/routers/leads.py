@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 from db.database import get_db
 from db.models import Lead, BlogSource, Campaign, ValidityStatus, OutreachEmail, OutreachStatus
 from utils.auth import get_current_user_id
@@ -164,7 +164,7 @@ async def validate_leads(
         try:
             v = await validate_email(lead.email)
             lead.validity_status = ValidityStatus(v["status"])
-            lead.validated_at = datetime.utcnow()
+            lead.validated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         except Exception as e:
             print(f"[validate] Error for {lead.email}: {e}")
 

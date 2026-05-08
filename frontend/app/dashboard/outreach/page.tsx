@@ -103,31 +103,41 @@ export default function OutreachPage() {
     }
   }, [open, editing]);
 
-  const load = useCallback(async (cid: number, filter?: string) => {
+  const load = useCallback(async (cid: number, filter?: string, silent = false) => {
     setError(null);
-    setListPage(1);
+    if (!silent) setListPage(1);
     const activeFilter = filter ?? statusFilter;
     const key = `outreach_${cid}_${activeFilter}`;
     const cached = getCached<OutreachEmail[]>(key);
-    if (cached) { setEmails(cached); setLoading(false); }
-    else setLoading(true);
-    try {
-      const params = new URLSearchParams({ campaign_id: String(cid) });
-      if (activeFilter !== "all") params.set("status", activeFilter);
-      const { data } = await api.get<OutreachEmail[]>(`/outreach/all?${params}`);
+    if (!silent) {
+      if (cached) { setEmails(cached); setLoading(false); }
+      else setLoading(true);
+    }
+
+    const params = new URLSearchParams({ campaign_id: String(cid) });
+    if (activeFilter !== "all") params.set("status", activeFilter);
+
+    // Fire emails and stats in parallel — halves perceived latency
+    const [emailsRes, statsRes] = await Promise.allSettled([
+      api.get<OutreachEmail[]>(`/outreach/all?${params}`),
+      api.get<CampaignStats>(`/campaigns/${cid}/stats`),
+    ]);
+
+    if (emailsRes.status === "fulfilled") {
+      const data = emailsRes.value.data;
       setEmails(data);
       setCached(key, data);
       setOpen((prev) => prev ? (data.find((e) => e.id === prev.id) ?? null) : null);
-    } catch {
+    } else if (!silent) {
       setError("Failed to load emails.");
       if (!cached) setEmails([]);
-    } finally {
-      setLoading(false);
     }
-    try {
-      const { data: s } = await api.get<CampaignStats>(`/campaigns/${cid}/stats`);
-      setStats(s);
-    } catch { /* non-critical */ }
+
+    if (statsRes.status === "fulfilled") {
+      setStats(statsRes.value.data);
+    }
+
+    if (!silent) setLoading(false);
   }, [statusFilter]);
 
   useEffect(() => {
@@ -154,7 +164,7 @@ export default function OutreachPage() {
         if (data.generated > 0) {
           showSuccess(`Auto-generated ${data.generated} draft${data.generated !== 1 ? "s" : ""} for new leads`);
           setStatusFilter("pending");
-          load(selectedId, "pending");
+          load(selectedId, "pending", true); // silent — no spinner flash
         }
       } catch { /* silent — user can still click Generate manually */ }
       finally { setGenerating(false); }
@@ -327,13 +337,21 @@ export default function OutreachPage() {
   async function approveSelected() {
     setApproving(true);
     setError(null);
+    const ids = Array.from(selected);
     try {
-      await Promise.all(Array.from(selected).map((id) => api.patch(`/outreach/${id}/approve`)));
+      const results = await Promise.allSettled(ids.map((id) => api.patch(`/outreach/${id}/approve`)));
+      const failedCount = results.filter((r) => r.status === "rejected").length;
+      const succeededCount = results.length - failedCount;
       setSelected(new Set());
       if (selectedId) await load(selectedId);
-      showSuccess(`${selected.size} email${selected.size !== 1 ? "s" : ""} approved`);
+      if (failedCount > 0) {
+        setError(`${failedCount} email${failedCount !== 1 ? "s" : ""} failed to approve.`);
+      }
+      if (succeededCount > 0) {
+        showSuccess(`${succeededCount} email${succeededCount !== 1 ? "s" : ""} approved`);
+      }
     } catch {
-      setError("Failed to approve some emails.");
+      setError("Failed to approve emails.");
     } finally {
       setApproving(false);
     }
@@ -443,7 +461,7 @@ export default function OutreachPage() {
           </p>
           <p className="text-xs mt-1 text-gray-400 max-w-xs">
             {stats.sources === 0
-              ? "SerpAPI returned no results. Try a different niche."
+              ? "No results found. Try a different niche."
               : `${stats.sources} blog${stats.sources !== 1 ? "s" : ""} found but none had a public email address.`}
           </p>
         </div>

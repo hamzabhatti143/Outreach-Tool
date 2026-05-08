@@ -62,6 +62,8 @@ async def _get_valid_token(user: User, db: AsyncSession) -> str:
         if r.status_code >= 400:
             raise HTTPException(status_code=502, detail=f"Token refresh failed: {r.text}")
         tokens = r.json()
+        if "access_token" not in tokens:
+            raise HTTPException(status_code=502, detail="Token refresh returned no access_token")
         user.gmail_access_token = tokens["access_token"]
         user.gmail_token_expiry = (now + timedelta(seconds=tokens.get("expires_in", 3600))).replace(tzinfo=None)
         await db.commit()

@@ -1,7 +1,6 @@
 import re
 
 _PATTERNS = [
-    (r"serpapi[^\s]*", "external-api"),
     (r"asyncpg[^\s]*", "db"),
     (r"postgresql\+asyncpg://[^\s]*", "db-url-redacted"),
     (r"sqlalchemy[^\s]*", "orm"),

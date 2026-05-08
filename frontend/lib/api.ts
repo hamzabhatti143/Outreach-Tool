@@ -1,7 +1,7 @@
 import axios, { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse } from "axios";
 import { getAccessToken, getRefreshToken, setTokens, clearTokens } from "./auth";
 
-const _SENSITIVE_SERVICES = ["serpapi", "asyncpg", "postgresql", "psycopg", "sqlalchemy", "DETAIL:", "HINT:"];
+const _SENSITIVE_SERVICES = ["asyncpg", "postgresql", "psycopg", "sqlalchemy", "DETAIL:", "HINT:"];
 
 function _sanitizeDetail(detail: unknown): string {
   if (typeof detail !== "string") return String(detail ?? "Something went wrong");
@@ -13,7 +13,7 @@ function _sanitizeDetail(detail: unknown): string {
   return msg || "Something went wrong";
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://hamzabhatti-outreach-tool-82fb335.hf.space";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const api: AxiosInstance = axios.create({
   baseURL: API_URL,

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from datetime import datetime
+from datetime import datetime, timezone
 from db.database import get_db
 from db.models import SentLog
 
@@ -29,7 +29,7 @@ async def track_open(
 
     if log:
         log.open_count = (log.open_count or 0) + 1
-        log.last_opened_at = datetime.utcnow()
+        log.last_opened_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await db.commit()
 
     return Response(

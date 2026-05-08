@@ -4,7 +4,7 @@ import os
 import secrets
 import smtplib
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from functools import partial
@@ -166,7 +166,7 @@ async def forgot_password(
 
     if user:
         token = secrets.token_urlsafe(32)
-        expires_at = (datetime.utcnow() + timedelta(minutes=_RESET_TOKEN_TTL_MINUTES)).isoformat()
+        expires_at = (datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=_RESET_TOKEN_TTL_MINUTES)).isoformat()
 
         stmt = pg_insert(AppSettings).values(
             key=f"reset_{token}",
@@ -211,7 +211,7 @@ async def reset_password(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid or expired reset link.")
 
-    if datetime.utcnow() > expires_at:
+    if datetime.now(timezone.utc).replace(tzinfo=None) > expires_at:
         await db.execute(sa_delete(AppSettings).where(AppSettings.key == f"reset_{body.token}"))
         await db.commit()
         raise HTTPException(status_code=400, detail="Reset link has expired. Please request a new one.")

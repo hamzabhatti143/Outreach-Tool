@@ -1,15 +1,26 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from db.models import Lead, OutreachEmail, ValidityStatus, OutreachStatus, SentEmailRegistry
+from db.models import Lead, OutreachEmail, ValidityStatus, OutreachStatus, SentEmailRegistry, Campaign, AppSettings
 
-_SUBJECT = "Fill Content Gaps and Outperform Your Competitors"
 
-_BODY = """Hi,
-I've been exploring your blog and noticed some key content gaps that your competitors are taking advantage of, driving traffic away from your site. The good news is, your site has significant potential to not only fill these gaps but also outperform them.
-I specialize in creating strategic content designed to close these gaps, attract more visitors, and ultimately boost your traffic. With the right approach, we can enhance your site's value and reclaim that competitive edge.
-Let me know if you'd like to discuss this further—I'd love to help you take your blog to the next level.
-Best regards,
-Howard"""
+async def _get_template(campaign_id: int, db: AsyncSession) -> tuple[str, str]:
+    """Return (subject, body) — user's saved template if set, otherwise the default."""
+    from routers.template import DEFAULT_SUBJECT, DEFAULT_BODY
+    campaign = await db.get(Campaign, campaign_id)
+    if not campaign:
+        return DEFAULT_SUBJECT, DEFAULT_BODY
+    user_id = campaign.user_id
+    sub_res = await db.execute(
+        select(AppSettings).where(AppSettings.key == f"template_subject_{user_id}")
+    )
+    bod_res = await db.execute(
+        select(AppSettings).where(AppSettings.key == f"template_body_{user_id}")
+    )
+    sub = sub_res.scalar_one_or_none()
+    bod = bod_res.scalar_one_or_none()
+    if sub and bod and sub.value and bod.value:
+        return sub.value, bod.value
+    return DEFAULT_SUBJECT, DEFAULT_BODY
 
 
 async def run_writer_agent(
@@ -18,7 +29,8 @@ async def run_writer_agent(
     db: AsyncSession,
 ) -> int:
     """
-    Creates outreach emails from a fixed template for every eligible lead.
+    Creates outreach emails for every eligible lead using the user's saved template
+    (or the default template if none is saved).
     Skips leads already in the global sent registry or with existing drafts.
     Returns count of emails created.
     """
@@ -81,15 +93,16 @@ async def run_writer_agent(
         print(f"[writer_agent] All remaining leads already contacted globally")
         return 0
 
-    print(f"[writer_agent] Creating {len(targets)} emails from fixed template")
+    subject, body = await _get_template(campaign_id, db)
+    print(f"[writer_agent] Creating {len(targets)} emails")
 
     generated = 0
     for lead in targets:
         db.add(OutreachEmail(
             lead_id=lead.id,
             campaign_id=campaign_id,
-            subject=_SUBJECT,
-            body=_BODY,
+            subject=subject,
+            body=body,
             status=OutreachStatus.pending,
         ))
         await db.commit()

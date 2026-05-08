@@ -2,7 +2,7 @@ import os
 import uuid
 import base64
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
@@ -114,7 +114,7 @@ async def send_email(outreach_email_id: int, db: AsyncSession) -> dict[str, Any]
     )
     if reg_check.scalar_one_or_none():
         outreach.status = OutreachStatus.sent
-        outreach.sent_at = datetime.utcnow()
+        outreach.sent_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await db.commit()
         return {"status": "skipped", "error": "Already in sent registry"}
 
@@ -126,7 +126,7 @@ async def send_email(outreach_email_id: int, db: AsyncSession) -> dict[str, Any]
             OutreachEmail.id == outreach_email_id,
             OutreachEmail.status == OutreachStatus.approved,
         )
-        .values(status=OutreachStatus.sent, sent_at=datetime.utcnow())
+        .values(status=OutreachStatus.sent, sent_at=datetime.now(timezone.utc).replace(tzinfo=None))
     )
     await db.commit()
 

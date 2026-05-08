@@ -1,11 +1,11 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from pydantic import BaseModel
 from db.database import get_db
@@ -48,48 +48,107 @@ class SendAllRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _enrich_emails(emails: list, db: AsyncSession) -> list[OutreachResponse]:
-    if not emails:
-        return []
-
-    lead_ids = [e.lead_id for e in emails]
-    leads_result = await db.execute(select(Lead).where(Lead.id.in_(lead_ids)))
-    leads_map: dict[int, Lead] = {l.id: l for l in leads_result.scalars().all()}
-
-    blog_ids = {l.source_blog_id for l in leads_map.values() if l.source_blog_id}
-    blogs_map: dict[int, BlogSource] = {}
-    if blog_ids:
-        blogs_result = await db.execute(select(BlogSource).where(BlogSource.id.in_(blog_ids)))
-        blogs_map = {b.id: b for b in blogs_result.scalars().all()}
-
+async def _query_emails(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    campaign_id: int | None = None,
+    status: str | None = None,
+    order_by_approved: bool = False,
+) -> list[OutreachResponse]:
+    """Single JOIN query — replaces the old 3-round-trip _enrich_emails approach."""
+    q = (
+        select(
+            OutreachEmail.id,
+            OutreachEmail.lead_id,
+            OutreachEmail.campaign_id,
+            OutreachEmail.subject,
+            OutreachEmail.body,
+            OutreachEmail.status,
+            OutreachEmail.created_at,
+            OutreachEmail.approved_at,
+            Lead.email.label("recipient_email"),
+            BlogSource.blog_name.label("blog_name"),
+        )
+        .join(Campaign, Campaign.id == OutreachEmail.campaign_id)
+        .join(Lead, Lead.id == OutreachEmail.lead_id)
+        .outerjoin(BlogSource, BlogSource.id == Lead.source_blog_id)
+        .where(Campaign.user_id == user_id)
+    )
+    if campaign_id:
+        q = q.where(OutreachEmail.campaign_id == campaign_id)
+    if status:
+        q = q.where(OutreachEmail.status == status)
+    q = q.order_by(
+        OutreachEmail.approved_at.desc() if order_by_approved
+        else OutreachEmail.created_at.desc()
+    )
+    rows = await db.execute(q)
     output = []
-    for e in emails:
-        lead = leads_map.get(e.lead_id)
-        blog = blogs_map.get(lead.source_blog_id) if lead and lead.source_blog_id else None
-        status_val = e.status.value if hasattr(e.status, "value") else str(e.status)
+    for r in rows.all():
+        status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
         output.append(OutreachResponse(
-            id=e.id,
-            lead_id=e.lead_id,
-            campaign_id=e.campaign_id,
-            recipient_email=lead.email if lead else "",
-            blog_name=blog.blog_name if blog else None,
-            subject=e.subject,
-            body=e.body,
+            id=r.id,
+            lead_id=r.lead_id,
+            campaign_id=r.campaign_id,
+            recipient_email=r.recipient_email or "",
+            blog_name=r.blog_name,
+            subject=r.subject,
+            body=r.body,
             status=status_val,
-            created_at=e.created_at,
-            approved_at=e.approved_at,
+            created_at=r.created_at,
+            approved_at=r.approved_at,
         ))
     return output
+
+
+async def _enrich_single(email: OutreachEmail, db: AsyncSession) -> OutreachResponse:
+    """Enrich one email object after an edit — reuses the JOIN helper."""
+    results = await _query_emails(
+        db, user_id=-1, campaign_id=None, status=None
+    )
+    # Targeted single-row query for the edited email
+    row = await db.execute(
+        select(
+            OutreachEmail.id,
+            OutreachEmail.lead_id,
+            OutreachEmail.campaign_id,
+            OutreachEmail.subject,
+            OutreachEmail.body,
+            OutreachEmail.status,
+            OutreachEmail.created_at,
+            OutreachEmail.approved_at,
+            Lead.email.label("recipient_email"),
+            BlogSource.blog_name.label("blog_name"),
+        )
+        .join(Lead, Lead.id == OutreachEmail.lead_id)
+        .outerjoin(BlogSource, BlogSource.id == Lead.source_blog_id)
+        .where(OutreachEmail.id == email.id)
+    )
+    r = row.one()
+    status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
+    return OutreachResponse(
+        id=r.id,
+        lead_id=r.lead_id,
+        campaign_id=r.campaign_id,
+        recipient_email=r.recipient_email or "",
+        blog_name=r.blog_name,
+        subject=r.subject,
+        body=r.body,
+        status=status_val,
+        created_at=r.created_at,
+        approved_at=r.approved_at,
+    )
 
 
 async def _upsert_app_setting(key: str, value: str, db: AsyncSession) -> None:
     stmt = pg_insert(AppSettings).values(
         key=key,
         value=value,
-        updated_at=datetime.utcnow(),
+        updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
     ).on_conflict_do_update(
         index_elements=["key"],
-        set_={"value": value, "updated_at": datetime.utcnow()},
+        set_={"value": value, "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)},
     )
     await db.execute(stmt)
     await db.commit()
@@ -99,7 +158,6 @@ async def _background_send_all(email_ids: list[int], user_id: int) -> None:
     """Send approved emails one-by-one with a 10s delay, tracking per-user progress."""
     from db.database import retry_session
     from tools.mailer import send_email
-    from sqlalchemy import delete as sa_delete
 
     progress_key = f"send_progress_{user_id}"
     sent = 0
@@ -113,11 +171,6 @@ async def _background_send_all(email_ids: list[int], user_id: int) -> None:
                 result = await send_email(email_id, db)
                 if result["status"] in ("sent", "skipped"):
                     sent += 1
-                    # Delete the sent row — it's no longer needed in the outreach list
-                    await db.execute(
-                        sa_delete(OutreachEmail).where(OutreachEmail.id == email_id)
-                    )
-                    await db.commit()
                 else:
                     failed += 1
                     failed_ids.append(email_id)
@@ -133,7 +186,10 @@ async def _background_send_all(email_ids: list[int], user_id: int) -> None:
                 "failed_ids": failed_ids,
                 "in_progress": (i + 1) < total,
             }
-            await _upsert_app_setting(progress_key, json.dumps(progress), db)
+            try:
+                await _upsert_app_setting(progress_key, json.dumps(progress), db)
+            except Exception as prog_exc:
+                logger.error("[send_all] progress update failed: %s", prog_exc)
 
         if (i + 1) < total:
             await asyncio.sleep(10)
@@ -190,17 +246,7 @@ async def list_all(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[OutreachResponse]:
-    query = (
-        select(OutreachEmail)
-        .join(Campaign, Campaign.id == OutreachEmail.campaign_id)
-        .where(Campaign.user_id == user_id)
-    )
-    if campaign_id:
-        query = query.where(OutreachEmail.campaign_id == campaign_id)
-    if status:
-        query = query.where(OutreachEmail.status == status)
-    result = await db.execute(query.order_by(OutreachEmail.created_at.desc()))
-    return await _enrich_emails(result.scalars().all(), db)
+    return await _query_emails(db, user_id=user_id, campaign_id=campaign_id, status=status)
 
 
 @router.get("/pending", response_model=list[OutreachResponse])
@@ -209,15 +255,7 @@ async def list_pending(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[OutreachResponse]:
-    query = (
-        select(OutreachEmail)
-        .join(Campaign, Campaign.id == OutreachEmail.campaign_id)
-        .where(Campaign.user_id == user_id, OutreachEmail.status == "pending")
-    )
-    if campaign_id:
-        query = query.where(OutreachEmail.campaign_id == campaign_id)
-    result = await db.execute(query.order_by(OutreachEmail.created_at.desc()))
-    return await _enrich_emails(result.scalars().all(), db)
+    return await _query_emails(db, user_id=user_id, campaign_id=campaign_id, status="pending")
 
 
 @router.get("/approved", response_model=list[OutreachResponse])
@@ -226,15 +264,7 @@ async def list_approved(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[OutreachResponse]:
-    query = (
-        select(OutreachEmail)
-        .join(Campaign, Campaign.id == OutreachEmail.campaign_id)
-        .where(Campaign.user_id == user_id, OutreachEmail.status == "approved")
-    )
-    if campaign_id:
-        query = query.where(OutreachEmail.campaign_id == campaign_id)
-    result = await db.execute(query.order_by(OutreachEmail.approved_at.desc()))
-    return await _enrich_emails(result.scalars().all(), db)
+    return await _query_emails(db, user_id=user_id, campaign_id=campaign_id, status="approved", order_by_approved=True)
 
 
 @router.get("/send-progress")
@@ -272,7 +302,7 @@ async def approve_all(
     result = await db.execute(query)
     emails = result.scalars().all()
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     for email in emails:
         email.status = OutreachStatus.approved
         email.approved_at = now
@@ -322,7 +352,7 @@ async def approve_email(
 ) -> dict:
     email = await _get_owned_email(email_id, user_id, db)
     email.status = OutreachStatus.approved
-    email.approved_at = datetime.utcnow()
+    email.approved_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await db.commit()
     return {"id": email_id, "status": "approved"}
 
@@ -353,5 +383,4 @@ async def edit_email(
         email.body = req.body
     await db.commit()
     await db.refresh(email)
-    enriched = await _enrich_emails([email], db)
-    return enriched[0]
+    return await _enrich_single(email, db)
