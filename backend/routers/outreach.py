@@ -103,11 +103,7 @@ async def _query_emails(
 
 
 async def _enrich_single(email: OutreachEmail, db: AsyncSession) -> OutreachResponse:
-    """Enrich one email object after an edit — reuses the JOIN helper."""
-    results = await _query_emails(
-        db, user_id=-1, campaign_id=None, status=None
-    )
-    # Targeted single-row query for the edited email
+    """Enrich one email object after an edit."""
     row = await db.execute(
         select(
             OutreachEmail.id,

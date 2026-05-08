@@ -54,10 +54,10 @@ async def _upsert_setting(key: str, value: str, db: AsyncSession) -> None:
     stmt = pg_insert(AppSettings).values(
         key=key,
         value=value,
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
     ).on_conflict_do_update(
         index_elements=["key"],
-        set_={"value": value, "updated_at": datetime.now(timezone.utc)},
+        set_={"value": value, "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)},
     )
     await db.execute(stmt)
     await db.commit()

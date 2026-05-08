@@ -81,28 +81,36 @@ async def _build_sources(
         )
         emailed_ids = {row[0] for row in emailed_res.all()}
 
+    source_ids = [s.id for s in sources]
+
+    # Batch: email counts per source
+    email_counts: dict[int, int] = {}
+    if source_ids:
+        counts_res = await db.execute(
+            select(Lead.source_blog_id, func.count(Lead.id))
+            .where(Lead.source_blog_id.in_(source_ids))
+            .group_by(Lead.source_blog_id)
+        )
+        email_counts = {row[0]: row[1] for row in counts_res.all()}
+
+    # Batch: query strings per query_id
+    query_ids = {s.query_id for s in sources if s.query_id}
+    query_strings: dict[int, str] = {}
+    if query_ids:
+        qs_res = await db.execute(
+            select(SearchQuery.id, SearchQuery.query_string)
+            .where(SearchQuery.id.in_(query_ids))
+        )
+        query_strings = {row[0]: row[1] for row in qs_res.all()}
+
     output: list[SourceResponse] = []
     for source in sources:
-        count_result = await db.execute(
-            select(func.count(Lead.id)).where(Lead.source_blog_id == source.id)
-        )
-        email_count = count_result.scalar() or 0
-
-        query_string = None
-        if source.query_id:
-            q_result = await db.execute(
-                select(SearchQuery).where(SearchQuery.id == source.query_id)
-            )
-            q = q_result.scalar_one_or_none()
-            if q:
-                query_string = q.query_string
-
         output.append(SourceResponse(
             id=source.id,
             blog_name=source.blog_name,
             url=source.url,
-            query_string=query_string,
-            email_count=email_count,
+            query_string=query_strings.get(source.query_id) if source.query_id else None,
+            email_count=email_counts.get(source.id, 0),
             found_at=source.found_at,
             already_emailed=source.id in emailed_ids,
         ))
