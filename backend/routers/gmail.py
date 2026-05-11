@@ -19,7 +19,7 @@ from utils.gmail_service import get_valid_token, has_oauth_credentials, _client_
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth/gmail", tags=["gmail"])
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://outreach-tool-drab.vercel.app")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_SCOPES = (
