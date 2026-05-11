@@ -54,6 +54,7 @@ class User(Base):
     gmail_access_token = Column(Text, nullable=True)
     gmail_refresh_token = Column(Text, nullable=True)
     gmail_token_expiry = Column(DateTime, nullable=True)
+    gmail_email = Column(String(255), nullable=True)
 
     campaigns = relationship("Campaign", back_populates="user", cascade="all, delete-orphan")
 

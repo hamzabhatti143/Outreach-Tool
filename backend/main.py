@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -13,6 +14,10 @@ from routers import gmail
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://outreach-tool-drab.vercel.app")
+
+
+# ── Background tasks ──────────────────────────────────────────────────────────
 
 async def _check_and_reset_quota() -> None:
     """
@@ -39,16 +44,14 @@ async def _check_and_reset_quota() -> None:
         if datetime.now(timezone.utc).replace(tzinfo=None) - exceeded_at < timedelta(hours=12):
             return
 
-        # 12 hours have passed — clear the flag
         await db.delete(setting)
 
-        # Find all campaigns waiting for quota reset
         paused_result = await db.execute(
             select(Campaign).where(Campaign.status == CampaignStatus.quota_paused)
         )
         paused = paused_result.scalars().all()
 
-        logger.info("SerpAPI quota reset detected, resuming %d campaigns", len(paused))
+        logger.info("[quota_reset] resuming %d paused campaigns", len(paused))
 
         campaign_data = [(c.id, c.niche, c.user_id) for c in paused]
         for c in paused:
@@ -56,29 +59,60 @@ async def _check_and_reset_quota() -> None:
 
         await db.commit()
 
-    # Kick off resume tasks outside the DB session
     for campaign_id, niche, user_id in campaign_data:
         asyncio.create_task(_resume_research_for_campaign(campaign_id, niche, user_id))
 
 
 async def _resume_research_for_campaign(campaign_id: int, niche: str, user_id: int) -> None:
-    """
-    Resume a quota-paused campaign by restarting the continuous pipeline loop.
-    Pagination state is preserved on the Campaign row so the loop picks up where it left off.
-    """
     from routers.campaigns import _run_pipeline
     await _run_pipeline(campaign_id, niche, user_id)
 
 
 async def _quota_reset_loop() -> None:
-    """Background loop: every 30 minutes, check if quota_paused campaigns can resume."""
+    """Every 30 minutes check if quota_paused campaigns can resume."""
     while True:
-        await asyncio.sleep(1800)  # 30 minutes
+        await asyncio.sleep(1800)
         try:
             await _check_and_reset_quota()
         except Exception as exc:
-            logger.error("[quota_reset_loop] Unhandled error: %s", exc)
+            logger.error("[quota_reset_loop] %s", exc)
 
+
+async def _poll_replies_for_all_users() -> None:
+    """Poll Gmail for new replies from every user who has Gmail connected."""
+    from db.database import AsyncSessionLocal
+    from db.models import User
+    from sqlalchemy import select
+    from tools.reply_tracker import poll_inbox
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User.id).where(User.gmail_refresh_token.isnot(None))
+        )
+        user_ids = [row[0] for row in result.all()]
+
+    for user_id in user_ids:
+        try:
+            outcome = await poll_inbox(user_id)
+            if outcome.get("new"):
+                logger.info("[reply_poll] user_id=%d: %d new replies", user_id, outcome["new"])
+            if outcome.get("errors"):
+                logger.warning("[reply_poll] user_id=%d errors: %s", user_id, outcome["errors"])
+        except Exception as exc:
+            logger.error("[reply_poll] user_id=%d: %s", user_id, exc)
+
+
+async def _reply_poll_loop() -> None:
+    """Poll Gmail replies every 10 minutes for all connected users."""
+    while True:
+        await asyncio.sleep(int(os.getenv("REPLY_POLL_INTERVAL_MINUTES", "10")) * 60)
+        try:
+            await _poll_replies_for_all_users()
+        except Exception as exc:
+            logger.error("[reply_poll_loop] %s", exc)
+
+
+# ── App setup ─────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -86,16 +120,19 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized.")
 
-    task = asyncio.create_task(_quota_reset_loop())
-    logger.info("Quota reset scheduler started.")
+    quota_task = asyncio.create_task(_quota_reset_loop())
+    poll_task = asyncio.create_task(_reply_poll_loop())
+    logger.info("Background tasks started. Frontend: %s", FRONTEND_URL)
 
     yield
 
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    quota_task.cancel()
+    poll_task.cancel()
+    for task in (quota_task, poll_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     logger.info("Shutting down.")
 
 
@@ -108,8 +145,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        FRONTEND_URL,
         "http://localhost:3000",
-        "https://hamzabhatti-outreach-tool-82fb335.hf.space",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -132,4 +169,8 @@ app.include_router(template.router)
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "frontend": FRONTEND_URL,
+        "backend": os.getenv("BASE_URL", ""),
+    }

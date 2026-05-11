@@ -18,10 +18,14 @@ from utils.auth import get_current_user_id
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth/gmail", tags=["gmail"])
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://outreach-tool-drab.vercel.app")
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GMAIL_SCOPES = "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_SCOPES = (
+    "https://www.googleapis.com/auth/gmail.send "
+    "https://www.googleapis.com/auth/gmail.readonly "
+    "https://www.googleapis.com/auth/gmail.modify"
+)
 
 # Short-lived in-memory state store (10-minute TTL)
 _pending_oauth: dict[str, tuple] = {}
@@ -164,6 +168,19 @@ async def oauth_callback(
     if "access_token" not in tokens:
         return RedirectResponse(f"{redirect_base}?gmail=error")
 
+    # Fetch the actual Gmail address for this account
+    gmail_email: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            profile_r = await client.get(
+                "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                headers={"Authorization": f"Bearer {tokens['access_token']}"},
+            )
+            if profile_r.status_code == 200:
+                gmail_email = profile_r.json().get("emailAddress")
+    except Exception as exc:
+        logger.warning("Could not fetch Gmail profile email: %s", exc)
+
     from db.database import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
         user = await db.get(User, user_id)
@@ -176,6 +193,7 @@ async def oauth_callback(
         user.gmail_token_expiry = (
             datetime.now(timezone.utc) + timedelta(seconds=tokens.get("expires_in", 3600))
         ).replace(tzinfo=None)
+        user.gmail_email = gmail_email
         await db.commit()
 
     return RedirectResponse(f"{redirect_base}?gmail=connected")
@@ -192,7 +210,7 @@ async def gmail_status(
     connected = bool(user.gmail_access_token and user.gmail_refresh_token)
     return {
         "connected": connected,
-        "email": user.email if connected else None,
+        "email": user.gmail_email if connected else None,
         "credentials_saved": bool(user.google_client_id),
     }
 
@@ -208,5 +226,6 @@ async def disconnect_gmail(
     user.gmail_access_token = None
     user.gmail_refresh_token = None
     user.gmail_token_expiry = None
+    user.gmail_email = None
     await db.commit()
     return {"success": True}
