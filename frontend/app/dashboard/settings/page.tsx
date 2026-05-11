@@ -21,7 +21,7 @@ function GmailSection() {
   const [connectedEmail, setConnectedEmail] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
-  const [redirectUri, setRedirectUri] = useState("https://hamzabhatti-outreach-tool-82fb335.hf.space/auth/gmail/callback");
+  const [redirectUri, setRedirectUri] = useState("http://localhost:8000/auth/gmail/callback");
   const [credLoading, setCredLoading] = useState(false);
   const [credSaved, setCredSaved] = useState(false);
   const [connectLoading, setConnectLoading] = useState(false);
@@ -220,7 +220,7 @@ function GmailSection() {
                   <div className="space-y-1.5">
                     <label className="text-sm font-medium text-gray-700">Authorized Redirect URI</label>
                     <Input value={redirectUri} onChange={(e) => setRedirectUri(e.target.value)}
-                      placeholder="https://hamzabhatti-outreach-tool-82fb335.hf.space/auth/gmail/callback" required />
+                      placeholder="http://localhost:8000/auth/gmail/callback" required />
                     <p className="text-xs text-gray-400">
                       Must match exactly what you added in Google Cloud Console.
                     </p>

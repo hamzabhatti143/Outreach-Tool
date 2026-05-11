@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-const REDIRECT_URI = "https://hamzabhatti-outreach-tool-82fb335.hf.space/auth/gmail/callback";
+const REDIRECT_URI = "http://localhost:8000/auth/gmail/callback";
 
 /* ── Reusable primitives ─────────────────────────────────────── */
 
