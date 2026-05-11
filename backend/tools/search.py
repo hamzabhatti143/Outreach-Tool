@@ -23,17 +23,34 @@ SKIP_DOMAINS = [
     "amazon.com", "wikipedia.org", "quora.com", "medium.com",
 ]
 
-BLOGS_PER_ROUND = 30
+BLOGS_PER_ROUND = 40
 _MAX_PER_DOMAIN = 2   # max URLs from the same root domain per round
-_DDG_MAX_RESULTS = 40  # results requested from DDG per query
+_DDG_MAX_RESULTS = 50  # results requested from DDG per query
 
 _QUERIES = [
+    # Traditional blog / guest-post discovery
     "{niche} blog write for us",
     "{niche} blog contact us",
     "{niche} blogs accepting guest posts",
     "{niche} blog submit article",
     "{niche} blogger outreach",
-    "{niche} site:blog contact",
+
+    # SaaS product and software company blogs
+    "{niche} SaaS blog contact",
+    "{niche} software company blog write for us",
+    "{niche} platform blog guest post",
+    "{niche} tool blog write for us",
+
+    # Service-based and agency blogs
+    "{niche} agency blog contact us",
+    "{niche} company blog write for us",
+    "{niche} service blog guest post",
+    "{niche} startup blog contact",
+
+    # Broader company blog discovery
+    "{niche} intitle:blog contact email",
+    "{niche} business blog submit article",
+    "{niche} B2B blog write for us",
 ]
 
 

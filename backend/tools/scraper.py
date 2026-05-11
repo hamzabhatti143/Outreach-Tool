@@ -123,6 +123,12 @@ def _get_pages_to_check(url: str) -> list[str]:
         urljoin(base, "/write-for-us"),
         urljoin(base, "/guest-post"),
         urljoin(base, "/advertise"),
+        # Common on SaaS / service-based sites
+        urljoin(base, "/team"),
+        urljoin(base, "/press"),
+        urljoin(base, "/partnerships"),
+        urljoin(base, "/contribute"),
+        urljoin(base, "/work-with-us"),
     ]
     seen: set[str] = set()
     result = []
