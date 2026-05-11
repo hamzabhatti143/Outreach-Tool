@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from db.database import get_db, AsyncSessionLocal
 from db.models import EmailReply, AIResponse, OutreachEmail, Lead, BlogSource, Campaign, User
 from utils.auth import get_current_user_id
-from routers.gmail import _get_valid_token
+from utils.gmail_service import get_valid_token as _get_valid_token
 
 load_dotenv()
 
