@@ -11,7 +11,12 @@ EMAIL_REGEX = re.compile(
 )
 
 SKIP_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".pdf", ".svg", ".webp", ".mp4")
-SKIP_DOMAINS = ("facebook.com", "twitter.com", "linkedin.com", "instagram.com", "youtube.com", "sentry.io")
+SKIP_DOMAINS = (
+    "facebook.com", "twitter.com", "linkedin.com", "youtube.com",
+    "instagram.com", "reddit.com", "pinterest.com", "tiktok.com",
+    "amazon.com", "wikipedia.org", "quora.com", "medium.com",
+    "sentry.io",
+)
 
 SKIP_EMAIL_PATTERNS = (
     "example.com", "sentry", "wixpress", "wordpress.org",
