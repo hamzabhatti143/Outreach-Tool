@@ -145,8 +145,8 @@ async def oauth_callback(
     except Exception as exc:
         logger.warning("Could not fetch Gmail profile: %s", exc)
 
-    from db.database import AsyncSessionLocal
-    async with AsyncSessionLocal() as db:
+    from db.database import retry_session
+    async with retry_session() as db:
         user = await db.get(User, user_id)
         if not user:
             return RedirectResponse(f"{redirect_base}?gmail=error")

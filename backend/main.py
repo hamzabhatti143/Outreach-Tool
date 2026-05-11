@@ -24,11 +24,11 @@ async def _check_and_reset_quota() -> None:
     Check if the search quota flag was set and 12 hours have passed.
     If yes: clear the flag and re-trigger research for all quota_paused campaigns.
     """
-    from db.database import AsyncSessionLocal
+    from db.database import retry_session
     from db.models import AppSettings, Campaign, CampaignStatus
     from sqlalchemy import select
 
-    async with AsyncSessionLocal() as db:
+    async with retry_session() as db:
         result = await db.execute(
             select(AppSettings).where(AppSettings.key == "quota_exceeded_at")
         )
@@ -80,12 +80,12 @@ async def _quota_reset_loop() -> None:
 
 async def _poll_replies_for_all_users() -> None:
     """Poll Gmail for new replies from every user who has Gmail connected."""
-    from db.database import AsyncSessionLocal
+    from db.database import retry_session
     from db.models import User
     from sqlalchemy import select
     from tools.reply_tracker import poll_inbox
 
-    async with AsyncSessionLocal() as db:
+    async with retry_session() as db:
         result = await db.execute(
             select(User.id).where(User.gmail_refresh_token.isnot(None))
         )

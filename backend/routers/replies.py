@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
-from db.database import get_db, AsyncSessionLocal
+from db.database import get_db, retry_session
 from db.models import EmailReply, AIResponse, OutreachEmail, Lead, BlogSource, Campaign, User
 from utils.auth import get_current_user_id
 from utils.gmail_service import get_valid_token as _get_valid_token
@@ -231,7 +231,7 @@ async def _generate_ai_reply(reply: EmailReply, outreach: OutreachEmail | None) 
 
 async def _send_reply_via_gmail(reply_id: int, to: str, subject: str, body: str) -> None:
     """Background task: load user Gmail token, send reply via Gmail API with threading headers."""
-    async with AsyncSessionLocal() as db:
+    async with retry_session() as db:
         reply = await db.get(EmailReply, reply_id)
         if not reply:
             return

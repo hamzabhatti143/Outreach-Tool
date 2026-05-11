@@ -135,8 +135,8 @@ async def retry_send(
     await db.commit()
 
     async def _retry(outreach_id: int) -> None:
-        from db.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
+        from db.database import retry_session
+        async with retry_session() as session:
             await send_email(outreach_id, session)
 
     background_tasks.add_task(_retry, log.outreach_email_id)

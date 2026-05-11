@@ -37,8 +37,8 @@ async def bulk_send(
     verified_ids = await _owned_email_ids(body.ids, user_id, db)
 
     async def _send(ids: list[int]) -> None:
-        from db.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
+        from db.database import retry_session
+        async with retry_session() as session:
             await run_sender_agent(ids, session)
 
     background_tasks.add_task(_send, verified_ids)
