@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import User
 from utils.auth import get_current_user_id
+from utils.gmail_service import get_valid_token, has_oauth_credentials, _client_id, _client_secret, _redirect_uri
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth/gmail", tags=["gmail"])
@@ -37,44 +38,6 @@ class CredentialsRequest(BaseModel):
     google_redirect_uri: str
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-async def _get_valid_token(user: User, db: AsyncSession) -> str:
-    """Return a valid Gmail access token, refreshing if needed."""
-    if not user.gmail_refresh_token:
-        raise HTTPException(status_code=403, detail="Gmail not connected. Connect Gmail in Settings.")
-
-    now = datetime.now(timezone.utc)
-    expiry = user.gmail_token_expiry
-    if expiry and expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
-
-    needs_refresh = (
-        not user.gmail_access_token
-        or expiry is None
-        or expiry <= now + timedelta(minutes=2)
-    )
-
-    if needs_refresh:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(GOOGLE_TOKEN_URL, data={
-                "client_id": user.google_client_id,
-                "client_secret": user.google_client_secret,
-                "refresh_token": user.gmail_refresh_token,
-                "grant_type": "refresh_token",
-            })
-        if r.status_code >= 400:
-            raise HTTPException(status_code=502, detail=f"Token refresh failed: {r.text}")
-        tokens = r.json()
-        if "access_token" not in tokens:
-            raise HTTPException(status_code=502, detail="Token refresh returned no access_token")
-        user.gmail_access_token = tokens["access_token"]
-        user.gmail_token_expiry = (now + timedelta(seconds=tokens.get("expires_in", 3600))).replace(tzinfo=None)
-        await db.commit()
-
-    return user.gmail_access_token  # type: ignore[return-value]
-
-
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/credentials")
@@ -83,7 +46,7 @@ async def save_credentials(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Save the user's Google OAuth client credentials."""
+    """Save per-user Google OAuth credentials (optional when env vars are set)."""
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -99,31 +62,32 @@ async def start_oauth(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Return the Google OAuth consent URL. Frontend should redirect the user there."""
+    """Return the Google OAuth consent URL. Frontend redirects the user there."""
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if not user.google_client_id or not user.google_client_secret or not user.google_redirect_uri:
-        raise HTTPException(status_code=400, detail="Save your Google OAuth credentials first.")
+
+    if not has_oauth_credentials(user):
+        raise HTTPException(
+            status_code=400,
+            detail="Gmail OAuth is not configured. Contact the administrator or save your credentials in Settings.",
+        )
+
+    cid = _client_id(user)
+    csecret = _client_secret(user)
+    redir = _redirect_uri(user)
 
     # Purge expired state entries
     now = time.monotonic()
-    expired = [s for s, v in _pending_oauth.items() if v[1] < now]
-    for s in expired:
+    for s in [s for s, v in _pending_oauth.items() if v[1] < now]:
         _pending_oauth.pop(s, None)
 
     state = secrets.token_urlsafe(16)
-    _pending_oauth[state] = (
-        user_id,
-        now + 600,  # expires in 10 minutes
-        user.google_client_id,
-        user.google_client_secret,
-        user.google_redirect_uri,
-    )
+    _pending_oauth[state] = (user_id, now + 600, cid, csecret, redir)
 
     url = GOOGLE_AUTH_URL + "?" + urlencode({
-        "client_id": user.google_client_id,
-        "redirect_uri": user.google_redirect_uri,
+        "client_id": cid,
+        "redirect_uri": redir,
         "response_type": "code",
         "scope": GMAIL_SCOPES,
         "access_type": "offline",
@@ -168,7 +132,7 @@ async def oauth_callback(
     if "access_token" not in tokens:
         return RedirectResponse(f"{redirect_base}?gmail=error")
 
-    # Fetch the actual Gmail address for this account
+    # Fetch the actual Gmail address connected
     gmail_email: str | None = None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -179,7 +143,7 @@ async def oauth_callback(
             if profile_r.status_code == 200:
                 gmail_email = profile_r.json().get("emailAddress")
     except Exception as exc:
-        logger.warning("Could not fetch Gmail profile email: %s", exc)
+        logger.warning("Could not fetch Gmail profile: %s", exc)
 
     from db.database import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
@@ -212,6 +176,9 @@ async def gmail_status(
         "connected": connected,
         "email": user.gmail_email if connected else None,
         "credentials_saved": bool(user.google_client_id),
+        "server_credentials": bool(
+            os.getenv("GOOGLE_CLIENT_ID") and os.getenv("GOOGLE_CLIENT_SECRET")
+        ),
     }
 
 

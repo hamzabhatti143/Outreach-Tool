@@ -69,7 +69,7 @@ async def poll_inbox(user_id: int) -> dict:
         EmailReply, OutreachEmail, Lead, SentLog, SentStatus,
         Campaign, User,
     )
-    from routers.gmail import _get_valid_token
+    from utils.gmail_service import get_valid_token as _get_valid_token
 
     new_count = 0
     errors: list[str] = []

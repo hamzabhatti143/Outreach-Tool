@@ -46,6 +46,22 @@ async def update_profile(
     return {"message": "Profile updated"}
 
 
+@router.get("/gmail-status")
+async def gmail_status_alias(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Alias for /auth/gmail/status — kept for backward compat."""
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    connected = bool(user.gmail_access_token and user.gmail_refresh_token)
+    return {
+        "gmail_connected": connected,
+        "gmail_email": user.gmail_email if connected else None,
+    }
+
+
 @router.delete("/account", status_code=204)
 async def delete_account(
     user_id: int = Depends(get_current_user_id),

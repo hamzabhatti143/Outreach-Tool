@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.models import OutreachEmail, SentLog, Lead, Campaign, User, OutreachStatus, SentStatus, SentEmailRegistry
-from routers.gmail import _get_valid_token
+from utils.gmail_service import get_valid_token as _get_valid_token
 
 logger = logging.getLogger(__name__)
 
