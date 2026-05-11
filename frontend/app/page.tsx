@@ -5,7 +5,7 @@ import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Search, Mail, Send, BarChart2, Shield, Zap,
-  ArrowRight, CheckCircle, Globe, Users, ExternalLink
+  ArrowRight, CheckCircle, Globe, Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -205,9 +205,9 @@ export default function LandingPage() {
             <span className="inline-block rounded-full bg-indigo-50 px-4 py-1.5 text-sm font-medium text-indigo-700 mb-4">
               One-time setup
             </span>
-            <h2 className="text-3xl font-bold text-gray-900 mb-4">Connect your Gmail in 4 steps</h2>
+            <h2 className="text-3xl font-bold text-gray-900 mb-4">Connect Gmail in seconds</h2>
             <p className="text-gray-600 max-w-2xl mx-auto">
-              OutreachAI uses the official Gmail API to send from your own account. You bring your own Google Cloud project — no shared keys, full control.
+              No API keys, no Google Cloud project. Just sign in with Google and OutreachAI sends from your own Gmail address.
             </p>
           </div>
 
@@ -217,23 +217,18 @@ export default function LandingPage() {
               {[
                 {
                   n: "1",
-                  title: "Create a Google Cloud Project",
-                  desc: "Go to console.cloud.google.com → New Project. Then go to APIs & Services → Library, search Gmail API, and click Enable.",
+                  title: "Create your account",
+                  desc: "Sign up with your email. Takes 10 seconds.",
                 },
                 {
                   n: "2",
-                  title: "Configure OAuth Consent Screen",
-                  desc: 'APIs & Services → OAuth consent screen → External. Add the gmail.send scope. Add your Gmail as a Test User so you can use it before verification.',
+                  title: "Go to Settings",
+                  desc: "Open the Settings page and click Connect Gmail Account.",
                 },
                 {
                   n: "3",
-                  title: "Create OAuth Credentials",
-                  desc: 'APIs & Services → Credentials → Create Credentials → OAuth Client ID. Choose "Web application". Add your backend callback URL as an Authorized Redirect URI. Download credentials.json.',
-                },
-                {
-                  n: "4",
-                  title: "Connect in Settings",
-                  desc: "Sign up, go to Settings → Gmail API, upload credentials.json (or paste Client ID + Secret), then click Connect Gmail Account to authorize.",
+                  title: "Sign in with Google",
+                  desc: "A Google OAuth window opens. Choose your Gmail, grant permissions, and you're done.",
                 },
               ].map((step) => (
                 <motion.div
@@ -254,15 +249,12 @@ export default function LandingPage() {
                 </motion.div>
               ))}
 
-              <a
-                href="https://console.cloud.google.com/apis/credentials"
-                target="_blank"
-                rel="noopener noreferrer"
+              <Link
+                href="/signup"
                 className="inline-flex items-center gap-2 mt-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
               >
-                <ExternalLink className="h-4 w-4" />
-                Open Google Cloud Console
-              </a>
+                Get Started Free <ArrowRight className="h-4 w-4" />
+              </Link>
             </div>
 
             {/* Info card */}
@@ -277,7 +269,7 @@ export default function LandingPage() {
                 Why Gmail API?
               </div>
               <p className="text-sm text-indigo-900 leading-relaxed">
-                The Gmail API uses OAuth 2.0 — the same standard Google uses for "Sign in with Google." You grant permission once and OutreachAI can send on your behalf. You keep full control and can revoke access any time.
+                The Gmail API uses OAuth 2.0 — the same standard Google uses for "Sign in with Google." You grant permission once and OutreachAI sends on your behalf. You keep full control and can revoke access any time.
               </p>
               <hr className="border-indigo-200" />
               <div className="space-y-2 text-sm text-indigo-900">
@@ -287,7 +279,7 @@ export default function LandingPage() {
                 </div>
                 <div className="flex items-start gap-2">
                   <CheckCircle className="h-4 w-4 shrink-0 text-green-600 mt-0.5" />
-                  No password ever stored — just short-lived OAuth tokens
+                  No password stored — OAuth tokens only
                 </div>
                 <div className="flex items-start gap-2">
                   <CheckCircle className="h-4 w-4 shrink-0 text-green-600 mt-0.5" />
