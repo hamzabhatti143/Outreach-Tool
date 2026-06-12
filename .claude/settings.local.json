@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git add *)",
+      "Bash(git -C \"D:\\\\outreach-tool\\\\outreach-system\" status)",
+      "Bash(git -C \"D:\\\\outreach-tool\\\\outreach-system\" diff)",
+      "Bash(git *)"
+    ]
+  }
+}

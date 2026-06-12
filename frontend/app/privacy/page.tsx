@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Zap } from "lucide-react";
 
-const LAST_UPDATED = "May 12, 2025";
+const LAST_UPDATED = "June 12, 2026";
 const APP_NAME = "OutreachAI";
 const CONTACT_EMAIL = "hamza.abtach90@gmail.com";
 
@@ -144,7 +144,14 @@ export default function PrivacyPolicyPage() {
 
       {/* Footer */}
       <footer className="border-t border-gray-100 py-8 px-6 text-center text-sm text-gray-400">
-        <p>© {new Date().getFullYear()} {APP_NAME}. <Link href="/" className="hover:underline">Back to Home</Link></p>
+        <p>
+          © {new Date().getFullYear()} {APP_NAME}.{' '}
+          <Link href="/privacy" className="hover:underline">Privacy</Link>{' '}
+          |{' '}
+          <Link href="/terms" className="hover:underline">Terms</Link>{' '}
+          |{' '}
+          <Link href="/" className="hover:underline">Back to Home</Link>
+        </p>
       </footer>
 
     </div>
