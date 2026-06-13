@@ -97,6 +97,16 @@ async def start_oauth(
     return {"url": url}
 
 
+@router.get("/google/connect")
+async def start_oauth_google_redirect(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Redirect misdirected Google OAuth initiation from /auth/google/connect to /auth/gmail/connect."""
+    # Delegate to the main start_oauth function
+    return await start_oauth(user_id, db)
+
+
 @router.get("/callback")
 async def oauth_callback(
     code: str | None = None,
@@ -161,6 +171,30 @@ async def oauth_callback(
         await db.commit()
 
     return RedirectResponse(f"{redirect_base}?gmail=connected")
+
+
+@router.get("/google/callback")
+async def oauth_google_callback_redirect(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    """Redirect misdirected Google OAuth callbacks from /auth/google/callback to /auth/gmail/callback."""
+    # Preserve all query parameters and redirect to the correct path
+    query_params = []
+    if code:
+        query_params.append(f"code={code}")
+    if state:
+        query_params.append(f"state={state}")
+    if error:
+        query_params.append(f"error={error}")
+
+    query_string = "&".join(query_params)
+    redirect_url = f"/auth/gmail/callback"
+    if query_string:
+        redirect_url += f"?{query_string}"
+
+    return RedirectResponse(redirect_url)
 
 
 @router.get("/status")
