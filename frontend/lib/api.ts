@@ -13,7 +13,7 @@ function _sanitizeDetail(detail: unknown): string {
   return msg || "Something went wrong";
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://hamzabhatti-outreach-tool-82fb335.hf.space";
 
 const api: AxiosInstance = axios.create({
   baseURL: API_URL,
